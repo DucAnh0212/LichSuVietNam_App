@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  db_lichsu:
+    image: postgres:15-alpine
+    container_name: lichsuvn_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secretpassword
+      POSTGRES_DB: lichsuvn_db
+    ports:  
+      - "5433:5432" 
+    volumes:
+      - lichsuvn_pgdata:/var/lib/postgresql/data 
+
+  pgadmin_lichsu: 
+    image: dpage/pgadmin4
+    container_name: lichsuvn_pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@lichsuvn.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db_lichsu
+
+  backend_lichsu:
+    build:
+      context: ./be
+      dockerfile: Dockerfile
+    container_name: lichsuvn_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://admin:secretpassword@db_lichsu:5432/lichsuvn_db
+    env_file:
+      - ./be/.env
+    volumes:
+      - ./be:/app
+    depends_on:
+      - db_lichsu
+
+volumes:
+  lichsuvn_pgdata:
