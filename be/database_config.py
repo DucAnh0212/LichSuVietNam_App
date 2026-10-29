@@ -1,9 +1,10 @@
 import os
 import uuid
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, TIMESTAMP, ForeignKey, func  
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, TIMESTAMP, ForeignKey, DateTime, BigInteger, Float, UniqueConstraint, func  
 from sqlalchemy.orm import declarative_base  
-from sqlalchemy.dialects.postgresql import UUID  
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -17,19 +18,38 @@ engine = create_engine(DATABASE_URL, echo=False)
 Base = declarative_base()
 
 class User(Base):
-    __tablename__ = 'users'
+    __tablename__ = "users"
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    username = Column(String(50), unique=True, nullable=False)
-    email = Column(String(100), unique=True, nullable=False)
+    username = Column(String(50), unique=True, nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
-    created_at = Column(TIMESTAMP, server_default=func.now())
+    ho_ten = Column(String(100), nullable=True)
+    role = Column(String(20), default="USER")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Quan hệ với tiến trình đọc
+    tien_trinh = relationship("TienTrinhDoc", back_populates="user", cascade="all, delete-orphan")
 
 class TienTrinhDoc(Base):
-    __tablename__ = 'tien_trinh_doc'
-    id_user = Column(UUID(as_uuid=True), ForeignKey('users.id'), primary_key=True)
-    id_sukien = Column(Integer, ForeignKey('su_kien.id'), primary_key=True)
+    __tablename__ = "tien_trinh_doc"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id_user = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    id_sukien = Column(Integer, ForeignKey("su_kien.id", ondelete="CASCADE"), nullable=False, index=True)
     toa_do_scroll = Column(Integer, default=0)
-    last_read_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    phan_tram_hoan_thanh = Column(Float, default=0.0)
+    da_hoan_thanh = Column(Boolean, default=False)
+    last_read_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("id_user", "id_sukien", name="uq_user_sukien"),
+    )
+
+    user = relationship("User", back_populates="tien_trinh")
+    su_kien = relationship("SuKien")
 
 class GiaiDoanLichSu(Base):
     __tablename__ = 'giai_doan_lich_su'
