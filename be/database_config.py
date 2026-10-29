@@ -14,7 +14,14 @@ DATABASE_URL = os.getenv(
     "postgresql+psycopg2://admin:secretpassword@localhost:5433/lichsuvn_db"
 )
 
-engine = create_engine(DATABASE_URL, echo=False) 
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,           
+    max_overflow=20,       
+    pool_timeout=30,       
+    pool_recycle=1800,      
+    pool_pre_ping=True      
+)
 Base = declarative_base()
 
 class User(Base):

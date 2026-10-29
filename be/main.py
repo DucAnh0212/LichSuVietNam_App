@@ -1,9 +1,12 @@
 import uuid
+import re
+import time
 from collections import defaultdict
 from typing import List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import or_, and_, func
 from sqlalchemy.orm import Session, sessionmaker
@@ -38,12 +41,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 1. Bật nén GZip cho toàn bộ API (đặt ngay dưới CORSMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# 2. Bộ nhớ đệm (In-Memory Cache) đơn giản, tự làm mới sau mỗi 10 phút (600 giây)
+_OVERVIEW_CACHE = {"data": None, "expires_at": 0}
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+        
+#Hàm tự động tìm kiếm các sự kiện có liên quan xuất hiện trong nội dung của bài viết
+def inject_inline_event_links(content: str, related_events_list: list) -> str:
+    if not content or not related_events_list:
+        return content
+
+    # Tạo danh sách các mẫu cần tìm: (chuỗi_cần_tìm, id_sự_kiện_đích)
+    patterns_to_link = []
+    for rel in related_events_list:
+        ev_id = rel["id"]
+        ev_title = rel["ten_sukien"].strip()
+        ev_year = rel["nam_dien_ra"]
+
+        # 1. Ưu tiên khớp chính xác tên sự kiện trước 
+        if len(ev_title) > 3:
+            clean_title = re.sub(r"\s*\(\d+\)", "", ev_title).strip()
+            patterns_to_link.append((re.escape(ev_title), ev_id))
+            if clean_title != ev_title and len(clean_title) > 4:
+                patterns_to_link.append((re.escape(clean_title), ev_id))
+
+        # 2. Khớp cụm từ "năm XXXX" 
+        if ev_year:
+            patterns_to_link.append((rf"năm\s+{ev_year}\b", ev_id))
+
+    # Sắp xếp ưu tiên chuỗi dài trước để tránh cắt nhầm chuỗi con
+    patterns_to_link.sort(key=lambda x: len(x[0]), reverse=True)
+
+    linked_ids_done = set()
+    modified_content = content
+
+    for pattern_str, target_id in patterns_to_link:
+        # Mỗi sự kiện liên quan chỉ cần highlight lần xuất hiện đầu tiên để bài đọc không bị rối mắt
+        if target_id in linked_ids_done:
+            continue
+
+        regex = re.compile(rf"(?<!>)\b({pattern_str})\b(?![^<]*</a>)", flags=re.IGNORECASE)
+        if regex.search(modified_content):
+            modified_content = regex.sub(
+                rf'<a href="event://{target_id}">\1</a>',
+                modified_content,
+                count=1
+            )
+            linked_ids_done.add(target_id)
+
+    return modified_content
 
 class GiaiDoanResponse(BaseModel):
     id: int
@@ -87,8 +141,12 @@ class ProgressUpdateRequest(BaseModel):
 
 @app.get("/api/v1/timeline/overview", tags=["Timeline (Pinch-to-Zoom)"])
 def get_timeline_overview(db: Session = Depends(get_db)):
-    eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
+    now = time.time()
+    # Nếu dữ liệu đã có sẵn trong RAM và chưa hết hạn -> Trả về ngay lập tức (0ms DB load)
+    if _OVERVIEW_CACHE["data"] is not None and now < _OVERVIEW_CACHE["expires_at"]:
+        return _OVERVIEW_CACHE["data"]
 
+    eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
     era_stats = (
         db.query(
             SuKien.id_giai_doan,
@@ -101,7 +159,7 @@ def get_timeline_overview(db: Session = Depends(get_db)):
     )
     stats_map = {row.id_giai_doan: row for row in era_stats}
 
-    return [
+    result = [
         {
             "id": era.id,
             "ten_giai_doan": era.ten_giai_doan,
@@ -115,6 +173,10 @@ def get_timeline_overview(db: Session = Depends(get_db)):
         for era in eras
     ]
 
+    # Lưu vào RAM trong 10 phút
+    _OVERVIEW_CACHE["data"] = result
+    _OVERVIEW_CACHE["expires_at"] = now + 600
+    return result
 
 @app.get("/api/v1/timeline/stream", tags=["Timeline (Pinch-to-Zoom)"])
 def stream_timeline_events(
@@ -457,12 +519,18 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
     )
 
     related_grouped = defaultdict(list)
+    flat_related = []
     for rel in related_rows:
-        related_grouped[rel.loai_lien_ket].append({
+        rel_item = {
             "id": rel.id,
             "ten_sukien": rel.ten_sukien,
             "nam_dien_ra": rel.nam_dien_ra
-        })
+        }
+        related_grouped[rel.loai_lien_ket].append(rel_item)
+        flat_related.append(rel_item)
+
+    # Tạo phiên bản nội dung đã được nhúng sẵn thẻ highlight liên kết
+    highlighted_content = inject_inline_event_links(event.noi_dung_chi_tiet, flat_related)
 
     return {
         "id": event.id,
@@ -475,7 +543,8 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         "thang_dien_ra": event.thang_dien_ra,
         "ngay_dien_ra": event.ngay_dien_ra,
         "noi_dung_tom_tat": event.noi_dung_tom_tat,
-        "noi_dung_chi_tiet": event.noi_dung_chi_tiet,
+        "noi_dung_chi_tiet": event.noi_dung_chi_tiet,               
+        "noi_dung_chi_tiet_linked": highlighted_content,            
         "media": [
             {
                 "id": m.id,
@@ -489,12 +558,8 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         ],
         "lien_ket_su_kien": related_grouped
     }
-
-
-# ==============================================================================
+    
 # 4. XÁC THỰC NGƯỜI DÙNG & TIẾN TRÌNH ĐỌC
-# ==============================================================================
-
 @app.post("/api/v1/auth/register", tags=["Auth"])
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter((User.username == req.username) | (User.email == req.email)).first():
@@ -547,8 +612,6 @@ def save_reading_progress(req: ProgressUpdateRequest, db: Session = Depends(get_
     )
     db.execute(stmt)
     db.commit()
-    return {"message": "Cập nhật tiến trình đọc thành công"}
-
 
 @app.get("/api/v1/reading-progress/{user_id}/{event_id}", tags=["Reading Progress"])
 def get_reading_progress(user_id: uuid.UUID, event_id: int, db: Session = Depends(get_db)):
@@ -566,25 +629,3 @@ def get_reading_progress(user_id: uuid.UUID, event_id: int, db: Session = Depend
         "da_hoan_thanh": progress.da_hoan_thanh,
         "last_read_at": progress.last_read_at
     }
-
-# 5. ENDPOINTS TƯƠNG THÍCH NGƯỢC (GIỮ NGUYÊN ĐƯỜNG DẪN CŨ CHO TEAM)
-
-@app.get("/api/giai-doan", response_model=List[GiaiDoanResponse], tags=["Legacy"])
-def get_danh_sach_giai_doan(db: Session = Depends(get_db)):
-    return db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau).all()
-
-@app.get("/api/su-kien", response_model=List[SuKienResponse], tags=["Legacy"])
-def get_danh_sach_su_kien(page: int = 1, limit: int = 20, db: Session = Depends(get_db)):
-    offset = (page - 1) * limit
-    return (
-        db.query(SuKien)
-        .order_by(
-            SuKien.nam_dien_ra.asc(),
-            SuKien.thang_dien_ra.asc().nulls_last(),
-            SuKien.ngay_dien_ra.asc().nulls_last(),
-            SuKien.id.asc()
-        )
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
