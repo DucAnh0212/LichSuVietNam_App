@@ -164,20 +164,25 @@ def run_youtube_crawler(videos_per_event: int = 3):
             print(" Bảng 'su_kien' đang trống! Hãy cào sự kiện trước.")
             return
 
-        # Kiểm tra sự kiện đã có video để bỏ qua, chống cào trùng lặp
-        existing_video_event_ids = {
-            r.id_sukien for r in db.query(Media.id_sukien).filter(Media.loai_media == "YOUTUBE_VIDEO").all()
+        # -------------------------------------------------------------
+        # CẢI TIẾN 1: Lấy cả ID đã có video VÀ ID đã xác nhận không có video
+        # -------------------------------------------------------------
+        checked_event_ids = {
+            r.id_sukien for r in db.query(Media.id_sukien).filter(
+                Media.loai_media.in_(["YOUTUBE_VIDEO", "NO_VIDEO"])
+            ).all()
         }
 
-        events_to_process = [ev for ev in all_events if ev.id not in existing_video_event_ids]
+        events_to_process = [ev for ev in all_events if ev.id not in checked_event_ids]
         total_todo = len(events_to_process)
 
         if total_todo == 0:
-            print(f" Toàn bộ {len(all_events)} sự kiện đều đã có video YouTube trong cơ sở dữ liệu.")
+            print(f" Toàn bộ {len(all_events)} sự kiện đều đã được quét xong trong cơ sở dữ liệu.")
             return
 
         added_video_count = 0
         events_with_video_count = 0
+        no_video_count = 0
         quota_ran_out = False
 
         print(f" Bắt đầu cào video YouTube cho {total_todo} sự kiện (Mục tiêu: {videos_per_event} video/sự kiện)...")
@@ -205,7 +210,7 @@ def run_youtube_crawler(videos_per_event: int = 3):
                 if is_quota_exceeded:
                     quota_ran_out = True
                     break
-
+                
             if video_list:
                 for v in video_list:
                     db.add(Media(
@@ -219,17 +224,28 @@ def run_youtube_crawler(videos_per_event: int = 3):
                 db.commit()
                 added_video_count += len(video_list)
                 events_with_video_count += 1
+            else:
+                db.add(Media(
+                    id_sukien=ev.id,
+                    loai_media="NO_VIDEO",
+                    url_link="NONE",
+                    tieu_de="Không tìm thấy video hợp chuẩn",
+                    nguon_goc="SYSTEM",
+                    is_thumbnail=False
+                ))
+                db.commit()
+                no_video_count += 1
 
             time.sleep(0.15)
 
         print("\n" + "=" * 65)
         if quota_ran_out:
             print(" THÔNG BÁO: Đã chạm giới hạn Quota hàng ngày (10.000 units) của YouTube Data API v3.")
-            print(f" Kết quả đợt này: Đã xử lý {events_with_video_count} sự kiện, lưu {added_video_count} video chuẩn.")
+            print(f" Kết quả đợt này: Đã xử lý {events_with_video_count} sự kiện (thêm {added_video_count} video), đánh dấu bỏ qua {no_video_count} sự kiện không có tư liệu.")
             print(" Google sẽ tự động đặt lại Quota vào khoảng 14:00 - 15:00 hàng ngày (giờ VN).")
             print(" Lần chạy kế tiếp sẽ tự động bắt đầu từ các sự kiện còn thiếu mà không trùng lặp.")
         else:
-            print(f" HOÀN TẤT: Đã quét hết danh sách. Thêm thành công {added_video_count} video từ các nguồn uy tín!")
+            print(f" HOÀN TẤT: Đã quét hết danh sách. Thêm thành công {added_video_count} video!")
         print("=" * 65)
 
     except Exception as e:

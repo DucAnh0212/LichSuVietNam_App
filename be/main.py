@@ -29,7 +29,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # Khởi tạo ứng dụng FastAPI
 app = FastAPI(
     title="Lịch Sử VN - Backend API",
-    version="2.0",
+    version="2.1",
+    description="Hệ thống API hỗ trợ Timeline Pinch-to-Zoom 3 tầng, Offline-First Sync, Auth & Cá nhân hóa Tiến trình đọc"
 )
 
 # Cấu hình CORS cho phép Mobile App truy cập
@@ -41,11 +42,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Bật nén GZip cho toàn bộ API (đặt ngay dưới CORSMiddleware)
+# 1. Bật nén GZip cho toàn bộ API (Đặc biệt hiệu quả cho gói Offline-Pack)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# 2. Bộ nhớ đệm (In-Memory Cache) đơn giản, tự làm mới sau mỗi 10 phút (600 giây)
+# 2. Bộ nhớ đệm (In-Memory Cache) giảm tải tuyệt đối cho Supabase
 _OVERVIEW_CACHE = {"data": None, "expires_at": 0}
+_OFFLINE_PACK_CACHE = {"data": None, "expires_at": 0}
 
 def get_db():
     db = SessionLocal()
@@ -53,8 +55,8 @@ def get_db():
         yield db
     finally:
         db.close()
-        
-#Hàm tự động tìm kiếm các sự kiện có liên quan xuất hiện trong nội dung của bài viết
+
+# Hàm tự động tìm kiếm các sự kiện có liên quan xuất hiện trong nội dung của bài viết
 def inject_inline_event_links(content: str, related_events_list: list) -> str:
     if not content or not related_events_list:
         return content
@@ -120,6 +122,7 @@ class SuKienResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
 class RegisterRequest(BaseModel):
     username: str
     email: EmailStr
@@ -137,12 +140,10 @@ class ProgressUpdateRequest(BaseModel):
     phan_tram_hoan_thanh: float
     da_hoan_thanh: bool
 
-# 2. CỤM API TIMELINE ĐA TẦNG 
 
 @app.get("/api/v1/timeline/overview", tags=["Timeline (Pinch-to-Zoom)"])
 def get_timeline_overview(db: Session = Depends(get_db)):
     now = time.time()
-    # Nếu dữ liệu đã có sẵn trong RAM và chưa hết hạn -> Trả về ngay lập tức (0ms DB load)
     if _OVERVIEW_CACHE["data"] is not None and now < _OVERVIEW_CACHE["expires_at"]:
         return _OVERVIEW_CACHE["data"]
 
@@ -178,15 +179,12 @@ def get_timeline_overview(db: Session = Depends(get_db)):
     _OVERVIEW_CACHE["expires_at"] = now + 600
     return result
 
+
 @app.get("/api/v1/timeline/stream", tags=["Timeline (Pinch-to-Zoom)"])
 def stream_timeline_events(
     limit: int = Query(20, ge=5, le=100, description="Số sự kiện tải mỗi lượt (mặc định 20)"),
-    anchor_era_id: Optional[int] = Query(
-        None,
-    ),
-    anchor_year: Optional[int] = Query(
-        None,
-    ),
+    anchor_era_id: Optional[int] = Query(None, description="ID giai đoạn khi người dùng đặt 2 ngón tay zoom"),
+    anchor_year: Optional[int] = Query(None, description="Năm cụ thể khi nhảy điểm neo"),
     cursor_year: Optional[int] = Query(None, description="Năm của sự kiện ở mép màn hình dùng làm con trỏ"),
     cursor_id: Optional[int] = Query(None, description="ID của sự kiện ở mép màn hình dùng làm con trỏ"),
     direction: str = Query("down", pattern="^(down|up)$", description="'down': cuộn xuống tương lai | 'up': vuốt ngược về quá khứ"),
@@ -439,8 +437,10 @@ def get_year_month_breakdown(year: int, db: Session = Depends(get_db)):
         ]
     }
 
-# 3. CHI TIẾT SỰ KIỆN, MEDIA, NHÂN QUẢ & TÌM KIẾM
 
+# ==============================================================================
+# 3. CHI TIẾT SỰ KIỆN, MEDIA, NHÂN QUẢ & TÌM KIẾM
+# ==============================================================================
 @app.get("/api/v1/events/search", tags=["Events"])
 def search_events(
     q: str = Query(..., min_length=1, description="Từ khóa tên sự kiện hoặc số năm"),
@@ -503,7 +503,10 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Không tìm thấy sự kiện")
 
     era = db.query(GiaiDoanLichSu).filter(GiaiDoanLichSu.id == event.id_giai_doan).first()
-    medias = db.query(Media).filter(Media.id_sukien == event_id).all()
+    medias = db.query(Media).filter(
+        Media.id_sukien == event_id,
+        Media.loai_media != "NO_VIDEO"
+    ).all()
 
     related_rows = (
         db.query(
@@ -558,8 +561,110 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         ],
         "lien_ket_su_kien": related_grouped
     }
-    
-# 4. XÁC THỰC NGƯỜI DÙNG & TIẾN TRÌNH ĐỌC
+
+
+# ==============================================================================
+# 4. ĐỒNG BỘ OFFLINE-FIRST CHO ROOM DATABASE (PHỤC VỤ TÙNG)
+# ==============================================================================
+@app.get("/api/v1/sync/offline-pack", tags=["Offline Sync (Room DB)"])
+def get_offline_sync_pack(
+    since_year: Optional[int] = Query(None, description="Tùy chọn lọc từ một năm cụ thể nếu muốn tải từng phần"),
+    db: Session = Depends(get_db)
+):
+    """
+    Xuất toàn bộ dữ liệu Text (24 giai đoạn, 995 sự kiện kèm nội dung chi tiết & liên kết nhân quả)
+    trong 1 gói nén GZip duy nhất để Android nạp vào SQLite (Room DB) phục vụ chế độ Offline.
+    """
+    now = time.time()
+    # Nếu tải toàn bộ (không lọc năm) và đã có trong RAM Cache -> trả về ngay lập tức
+    if since_year is None and _OFFLINE_PACK_CACHE["data"] is not None and now < _OFFLINE_PACK_CACHE["expires_at"]:
+        return _OFFLINE_PACK_CACHE["data"]
+
+    eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
+
+    ev_query = (
+        db.query(
+            SuKien.id,
+            SuKien.id_giai_doan,
+            SuKien.ten_sukien,
+            SuKien.nam_dien_ra,
+            SuKien.thang_dien_ra,
+            SuKien.ngay_dien_ra,
+            SuKien.noi_dung_tom_tat,
+            SuKien.noi_dung_chi_tiet,
+            Media.url_link.label("thumbnail_url")
+        )
+        .outerjoin(Media, (Media.id_sukien == SuKien.id) & (Media.is_thumbnail == True))
+    )
+
+    if since_year is not None:
+        ev_query = ev_query.filter(SuKien.nam_dien_ra >= since_year)
+
+    events = (
+        ev_query.order_by(
+            SuKien.nam_dien_ra.asc(),
+            SuKien.thang_dien_ra.asc().nulls_last(),
+            SuKien.ngay_dien_ra.asc().nulls_last(),
+            SuKien.id.asc()
+        )
+        .all()
+    )
+
+    links = db.query(
+        LienKetSuKien.id_sukien_goc,
+        LienKetSuKien.id_sukien_lien_quan,
+        LienKetSuKien.loai_lien_ket
+    ).all()
+
+    payload = {
+        "synced_at": int(now),
+        "total_eras": len(eras),
+        "total_events": len(events),
+        "eras": [
+            {
+                "id": era.id,
+                "ten_giai_doan": era.ten_giai_doan,
+                "nam_bat_dau": era.nam_bat_dau,
+                "nam_ket_thuc": era.nam_ket_thuc,
+                "mo_ta": era.mo_ta
+            }
+            for era in eras
+        ],
+        "events": [
+            {
+                "id": ev.id,
+                "id_giai_doan": ev.id_giai_doan,
+                "ten_sukien": ev.ten_sukien,
+                "nam_dien_ra": ev.nam_dien_ra,
+                "thang_dien_ra": ev.thang_dien_ra,
+                "ngay_dien_ra": ev.ngay_dien_ra,
+                "noi_dung_tom_tat": ev.noi_dung_tom_tat,
+                "noi_dung_chi_tiet": ev.noi_dung_chi_tiet,
+                "thumbnail_url": ev.thumbnail_url
+            }
+            for ev in events
+        ],
+        "links": [
+            {
+                "id_sukien_goc": lk.id_sukien_goc,
+                "id_sukien_lien_quan": lk.id_sukien_lien_quan,
+                "loai_lien_ket": lk.loai_lien_ket
+            }
+            for lk in links
+        ]
+    }
+
+    if since_year is None:
+        # Lưu vào RAM Cache trong 30 phút (1800 giây)
+        _OFFLINE_PACK_CACHE["data"] = payload
+        _OFFLINE_PACK_CACHE["expires_at"] = now + 1800
+
+    return payload
+
+
+# ==============================================================================
+# 5. XÁC THỰC NGƯỜI DÙNG & TIẾN TRÌNH ĐỌC
+# ==============================================================================
 @app.post("/api/v1/auth/register", tags=["Auth"])
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter((User.username == req.username) | (User.email == req.email)).first():
@@ -575,7 +680,13 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    return {"message": "Đăng ký thành công", "user_id": str(new_user.id), "username": new_user.username}
+    return {
+        "message": "Đăng ký thành công",
+        "user_id": str(new_user.id),
+        "username": new_user.username,
+        "ho_ten": new_user.ho_ten,
+        "role": new_user.role
+    }
 
 
 @app.post("/api/v1/auth/login", tags=["Auth"])
@@ -584,10 +695,32 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sai tài khoản hoặc mật khẩu")
 
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tài khoản này hiện đang bị khóa")
+
     return {
         "message": "Đăng nhập thành công",
         "user_id": str(user.id),
         "username": user.username,
+        "email": user.email,
+        "ho_ten": user.ho_ten,
+        "role": user.role
+    }
+
+
+@app.get("/api/v1/auth/session/{user_id}", tags=["Auth"])
+def verify_saved_session(user_id: uuid.UUID, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Phiên đăng nhập không hợp lệ hoặc tài khoản đã bị khóa"
+        )
+    return {
+        "valid": True,
+        "user_id": str(user.id),
+        "username": user.username,
+        "email": user.email,
         "ho_ten": user.ho_ten,
         "role": user.role
     }
@@ -612,6 +745,81 @@ def save_reading_progress(req: ProgressUpdateRequest, db: Session = Depends(get_
     )
     db.execute(stmt)
     db.commit()
+    return {
+        "message": "Cập nhật tiến trình đọc thành công",
+        "id_user": str(req.id_user),
+        "id_sukien": req.id_sukien,
+        "da_hoan_thanh": req.da_hoan_thanh
+    }
+
+
+@app.get("/api/v1/reading-progress/{user_id}/summary", tags=["Reading Progress"])
+def get_user_reading_summary(
+    user_id: uuid.UUID,
+    limit: int = Query(10, ge=1, le=50, description="Số bài vừa đọc gần đây muốn hiển thị"),
+    db: Session = Depends(get_db)
+):
+    total_system_events = db.query(func.count(SuKien.id)).scalar() or 995
+
+    completed_count = (
+        db.query(func.count(TienTrinhDoc.id))
+        .filter(TienTrinhDoc.id_user == user_id, TienTrinhDoc.da_hoan_thanh == True)
+        .scalar() or 0
+    )
+
+    in_progress_count = (
+        db.query(func.count(TienTrinhDoc.id))
+        .filter(TienTrinhDoc.id_user == user_id, TienTrinhDoc.da_hoan_thanh == False)
+        .scalar() or 0
+    )
+
+    recent_rows = (
+        db.query(
+            TienTrinhDoc.id_sukien,
+            SuKien.ten_sukien,
+            SuKien.nam_dien_ra,
+            GiaiDoanLichSu.ten_giai_doan,
+            TienTrinhDoc.toa_do_scroll,
+            TienTrinhDoc.phan_tram_hoan_thanh,
+            TienTrinhDoc.da_hoan_thanh,
+            TienTrinhDoc.last_read_at,
+            Media.url_link.label("thumbnail_url")
+        )
+        .join(SuKien, TienTrinhDoc.id_sukien == SuKien.id)
+        .outerjoin(GiaiDoanLichSu, SuKien.id_giai_doan == GiaiDoanLichSu.id)
+        .outerjoin(Media, (Media.id_sukien == SuKien.id) & (Media.is_thumbnail == True))
+        .filter(TienTrinhDoc.id_user == user_id)
+        .order_by(TienTrinhDoc.last_read_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    recent_list = [
+        {
+            "id_sukien": r.id_sukien,
+            "ten_sukien": r.ten_sukien,
+            "nam_dien_ra": r.nam_dien_ra,
+            "ten_giai_doan": r.ten_giai_doan,
+            "toa_do_scroll": r.toa_do_scroll,
+            "phan_tram_hoan_thanh": r.phan_tram_hoan_thanh,
+            "da_hoan_thanh": r.da_hoan_thanh,
+            "quiz_unlocked": r.da_hoan_thanh,  # Cờ báo cho Tùng biết sự kiện này đã đủ điều kiện mở câu hỏi ôn tập chưa
+            "last_read_at": r.last_read_at,
+            "thumbnail_url": r.thumbnail_url
+        }
+        for r in recent_rows
+    ]
+
+    return {
+        "user_id": str(user_id),
+        "total_system_events": total_system_events,
+        "completed_events": completed_count,
+        "in_progress_events": in_progress_count,
+        "completion_percentage": round((completed_count / total_system_events) * 100, 2) if total_system_events else 0.0,
+        "last_active_event": recent_list[0] if recent_list else None,  # Sự kiện vừa đọc gần nhất để khôi phục nhanh
+        "recent_history": recent_list
+    }
+
 
 @app.get("/api/v1/reading-progress/{user_id}/{event_id}", tags=["Reading Progress"])
 def get_reading_progress(user_id: uuid.UUID, event_id: int, db: Session = Depends(get_db)):
@@ -621,11 +829,18 @@ def get_reading_progress(user_id: uuid.UUID, event_id: int, db: Session = Depend
         .first()
     )
     if not progress:
-        return {"id_sukien": event_id, "toa_do_scroll": 0, "phan_tram_hoan_thanh": 0.0, "da_hoan_thanh": False}
+        return {
+            "id_sukien": event_id,
+            "toa_do_scroll": 0,
+            "phan_tram_hoan_thanh": 0.0,
+            "da_hoan_thanh": False,
+            "quiz_unlocked": False
+        }
     return {
         "id_sukien": progress.id_sukien,
         "toa_do_scroll": progress.toa_do_scroll,
         "phan_tram_hoan_thanh": progress.phan_tram_hoan_thanh,
         "da_hoan_thanh": progress.da_hoan_thanh,
+        "quiz_unlocked": progress.da_hoan_thanh,
         "last_read_at": progress.last_read_at
     }
