@@ -101,6 +101,7 @@ def inject_inline_event_links(content: str, related_events_list: list) -> str:
 
     return modified_content
 
+# 1. PYDANTIC SCHEMAS
 class GiaiDoanResponse(BaseModel):
     id: int
     ten_giai_doan: str
@@ -140,10 +141,11 @@ class ProgressUpdateRequest(BaseModel):
     phan_tram_hoan_thanh: float
     da_hoan_thanh: bool
 
-
+# 2. CỤM API TIMELINE ĐA TẦNG (PINCH-TO-ZOOM & STREAM)
 @app.get("/api/v1/timeline/overview", tags=["Timeline (Pinch-to-Zoom)"])
 def get_timeline_overview(db: Session = Depends(get_db)):
     now = time.time()
+    # Nếu dữ liệu đã có sẵn trong RAM và chưa hết hạn -> Trả về ngay lập tức (0ms DB load)
     if _OVERVIEW_CACHE["data"] is not None and now < _OVERVIEW_CACHE["expires_at"]:
         return _OVERVIEW_CACHE["data"]
 
@@ -437,10 +439,7 @@ def get_year_month_breakdown(year: int, db: Session = Depends(get_db)):
         ]
     }
 
-
-# ==============================================================================
 # 3. CHI TIẾT SỰ KIỆN, MEDIA, NHÂN QUẢ & TÌM KIẾM
-# ==============================================================================
 @app.get("/api/v1/events/search", tags=["Events"])
 def search_events(
     q: str = Query(..., min_length=1, description="Từ khóa tên sự kiện hoặc số năm"),
@@ -562,19 +561,12 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         "lien_ket_su_kien": related_grouped
     }
 
-
-# ==============================================================================
 # 4. ĐỒNG BỘ OFFLINE-FIRST CHO ROOM DATABASE (PHỤC VỤ TÙNG)
-# ==============================================================================
 @app.get("/api/v1/sync/offline-pack", tags=["Offline Sync (Room DB)"])
 def get_offline_sync_pack(
     since_year: Optional[int] = Query(None, description="Tùy chọn lọc từ một năm cụ thể nếu muốn tải từng phần"),
     db: Session = Depends(get_db)
 ):
-    """
-    Xuất toàn bộ dữ liệu Text (24 giai đoạn, 995 sự kiện kèm nội dung chi tiết & liên kết nhân quả)
-    trong 1 gói nén GZip duy nhất để Android nạp vào SQLite (Room DB) phục vụ chế độ Offline.
-    """
     now = time.time()
     # Nếu tải toàn bộ (không lọc năm) và đã có trong RAM Cache -> trả về ngay lập tức
     if since_year is None and _OFFLINE_PACK_CACHE["data"] is not None and now < _OFFLINE_PACK_CACHE["expires_at"]:
@@ -661,10 +653,7 @@ def get_offline_sync_pack(
 
     return payload
 
-
-# ==============================================================================
 # 5. XÁC THỰC NGƯỜI DÙNG & TIẾN TRÌNH ĐỌC
-# ==============================================================================
 @app.post("/api/v1/auth/register", tags=["Auth"])
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter((User.username == req.username) | (User.email == req.email)).first():
