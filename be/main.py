@@ -56,6 +56,17 @@ def get_db():
     finally:
         db.close()
 
+def get_thumbnail_subquery(db: Session):
+    return (
+        db.query(
+            Media.id_sukien,
+            func.min(Media.url_link).label("thumbnail_url")
+        )
+        .filter(Media.is_thumbnail == True, Media.loai_media != "NO_VIDEO")
+        .group_by(Media.id_sukien)
+        .subquery()
+    )
+
 # Hàm tự động tìm kiếm các sự kiện có liên quan xuất hiện trong nội dung của bài viết
 def inject_inline_event_links(content: str, related_events_list: list) -> str:
     if not content or not related_events_list:
@@ -140,6 +151,16 @@ class ProgressUpdateRequest(BaseModel):
     toa_do_scroll: int
     phan_tram_hoan_thanh: float
     da_hoan_thanh: bool
+    
+    
+@app.get("/", tags=["Health Check"])
+def root_health_check():
+    return {
+        "status": "online",
+        "service": "Lịch Sử Việt Nam Tương Tác - Backend API",
+        "version": "2.2",
+        "docs_url": "/docs"
+    }
 
 # 2. CỤM API TIMELINE ĐA TẦNG (PINCH-TO-ZOOM & STREAM)
 @app.get("/api/v1/timeline/overview", tags=["Timeline (Pinch-to-Zoom)"])
@@ -442,11 +463,14 @@ def get_year_month_breakdown(year: int, db: Session = Depends(get_db)):
 # 3. CHI TIẾT SỰ KIỆN, MEDIA, NHÂN QUẢ & TÌM KIẾM
 @app.get("/api/v1/events/search", tags=["Events"])
 def search_events(
-    q: str = Query(..., min_length=1, description="Từ khóa tên sự kiện hoặc số năm"),
-    limit: int = 20,
+    q: Optional[str] = Query(None, description="Từ khóa tên sự kiện, tóm tắt hoặc số năm"),
+    era_id: Optional[int] = Query(None, description="Lọc theo ID giai đoạn lịch sử"),
+    from_year: Optional[int] = Query(None, description="Lọc từ năm (VD: -257 hoặc 938)"),
+    to_year: Optional[int] = Query(None, description="Lọc đến năm (VD: 1975)"),
+    limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db)
 ):
-    keyword = f"%{q.strip()}%"
+    thumb_sub = get_thumbnail_subquery(db)
     query = (
         db.query(
             SuKien.id,
@@ -457,27 +481,36 @@ def search_events(
             SuKien.thang_dien_ra,
             SuKien.ngay_dien_ra,
             SuKien.noi_dung_tom_tat,
-            Media.url_link.label("thumbnail_url")
+            thumb_sub.c.thumbnail_url
         )
         .outerjoin(GiaiDoanLichSu, SuKien.id_giai_doan == GiaiDoanLichSu.id)
-        .outerjoin(Media, (Media.id_sukien == SuKien.id) & (Media.is_thumbnail == True))
+        .outerjoin(thumb_sub, thumb_sub.c.id_sukien == SuKien.id)
     )
 
-    if q.strip().lstrip("-").isdigit():
-        year_val = int(q.strip())
-        results = query.filter(SuKien.nam_dien_ra == year_val).limit(limit).all()
-    else:
-        results = (
-            query.filter(
+    # 1. Lọc theo giai đoạn và khoảng năm (nếu có)
+    if era_id is not None:
+        query = query.filter(SuKien.id_giai_doan == era_id)
+    if from_year is not None:
+        query = query.filter(SuKien.nam_dien_ra >= from_year)
+    if to_year is not None:
+        query = query.filter(SuKien.nam_dien_ra <= to_year)
+
+    # 2. Lọc theo từ khóa hoặc số năm chính xác
+    if q and q.strip():
+        clean_q = q.strip()
+        if clean_q.lstrip("-").isdigit():
+            year_val = int(clean_q)
+            query = query.filter(SuKien.nam_dien_ra == year_val)
+        else:
+            keyword = f"%{clean_q}%"
+            query = query.filter(
                 or_(
                     SuKien.ten_sukien.ilike(keyword),
                     SuKien.noi_dung_tom_tat.ilike(keyword)
                 )
             )
-            .order_by(SuKien.nam_dien_ra.asc(), SuKien.id.asc())
-            .limit(limit)
-            .all()
-        )
+
+    results = query.order_by(SuKien.nam_dien_ra.asc(), SuKien.id.asc()).limit(limit).all()
 
     return [
         {
@@ -507,7 +540,8 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         Media.loai_media != "NO_VIDEO"
     ).all()
 
-    related_rows = (
+    # Chiều xuôi: Sự kiện hiện tại là gốc -> dẫn tới sự kiện khác
+    forward_links = (
         db.query(
             LienKetSuKien.loai_lien_ket,
             SuKien.id,
@@ -516,20 +550,45 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         )
         .join(SuKien, LienKetSuKien.id_sukien_lien_quan == SuKien.id)
         .filter(LienKetSuKien.id_sukien_goc == event_id)
-        .order_by(SuKien.nam_dien_ra.asc())
+        .all()
+    )
+
+    # Chiều ngược: Sự kiện khác dẫn tới sự kiện hiện tại (đảo nhãn hợp lý)
+    backward_links = (
+        db.query(
+            LienKetSuKien.loai_lien_ket,
+            SuKien.id,
+            SuKien.ten_sukien,
+            SuKien.nam_dien_ra
+        )
+        .join(SuKien, LienKetSuKien.id_sukien_goc == SuKien.id)
+        .filter(LienKetSuKien.id_sukien_lien_quan == event_id)
         .all()
     )
 
     related_grouped = defaultdict(list)
     flat_related = []
-    for rel in related_rows:
-        rel_item = {
-            "id": rel.id,
-            "ten_sukien": rel.ten_sukien,
-            "nam_dien_ra": rel.nam_dien_ra
-        }
-        related_grouped[rel.loai_lien_ket].append(rel_item)
-        flat_related.append(rel_item)
+    seen_rel_ids = set()
+
+    for rel in forward_links:
+        if rel.id not in seen_rel_ids:
+            seen_rel_ids.add(rel.id)
+            rel_item = {"id": rel.id, "ten_sukien": rel.ten_sukien, "nam_dien_ra": rel.nam_dien_ra}
+            related_grouped[rel.loai_lien_ket].append(rel_item)
+            flat_related.append(rel_item)
+
+    reverse_label_map = {
+        "KET_QUA": "TIEN_DE",
+        "TIEN_DE": "KET_QUA",
+        "NGUYEN_NHAN": "HE_QUA"
+    }
+    for rel in backward_links:
+        if rel.id not in seen_rel_ids:
+            seen_rel_ids.add(rel.id)
+            mapped_type = reverse_label_map.get(rel.loai_lien_ket, rel.loai_lien_ket)
+            rel_item = {"id": rel.id, "ten_sukien": rel.ten_sukien, "nam_dien_ra": rel.nam_dien_ra}
+            related_grouped[mapped_type].append(rel_item)
+            flat_related.append(rel_item)
 
     # Tạo phiên bản nội dung đã được nhúng sẵn thẻ highlight liên kết
     highlighted_content = inject_inline_event_links(event.noi_dung_chi_tiet, flat_related)
