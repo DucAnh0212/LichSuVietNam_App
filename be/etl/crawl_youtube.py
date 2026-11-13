@@ -159,14 +159,15 @@ def search_youtube_videos(query: str, raw_event_title: str, max_results: int = 3
 def run_youtube_crawler(videos_per_event: int = 3):
     db = SessionLocal()
     try:
-        all_events = db.query(SuKien).order_by(SuKien.id.asc()).all()
+        all_events = (
+            db.query(SuKien.id, SuKien.ten_sukien, SuKien.nam_dien_ra)
+            .order_by(SuKien.id.asc())
+            .all()
+        )
         if not all_events:
             print(" Bảng 'su_kien' đang trống! Hãy cào sự kiện trước.")
             return
 
-        # -------------------------------------------------------------
-        # CẢI TIẾN 1: Lấy cả ID đã có video VÀ ID đã xác nhận không có video
-        # -------------------------------------------------------------
         checked_event_ids = {
             r.id_sukien for r in db.query(Media.id_sukien).filter(
                 Media.loai_media.in_(["YOUTUBE_VIDEO", "NO_VIDEO"])
