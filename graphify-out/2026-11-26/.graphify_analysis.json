@@ -1,0 +1,319 @@
+{
+  "communities": {
+    "0": [
+      "be_database_config_lienketsukien",
+      "be_etl_cloud_helper",
+      "be_etl_cloud_helper_build_event_image_id",
+      "be_etl_cloud_helper_extract_youtube_id",
+      "be_etl_cloud_helper_slugify_vietnamese",
+      "be_etl_cloud_helper_upload_wiki_image_to_cloud",
+      "be_etl_crawl_wiki",
+      "be_etl_crawl_wiki_auto_detect_date",
+      "be_etl_crawl_wiki_crawl_category_recursive",
+      "be_etl_crawl_wiki_fetch_wiki_article_rich",
+      "be_etl_crawl_wiki_find_era_id",
+      "be_etl_crawl_wiki_inject_inline_images_into_detail",
+      "be_etl_crawl_wiki_is_valid_content_image",
+      "be_etl_crawl_wiki_run_full_crawler",
+      "be_etl_crawl_wiki_safe_download_image_bytes",
+      "be_etl_crawl_wiki_upload_image_to_cloudinary_strict",
+      "be_etl_crawl_wiki_upsert_event_and_media",
+      "be_etl_data_cleaner",
+      "be_etl_data_cleaner_clean_wiki_text",
+      "be_etl_data_cleaner_parse_historical_date",
+      "be_etl_data_cleaner_rationale_32",
+      "be_etl_data_cleaner_rationale_6",
+      "be_etl_data_cleaner_rationale_73",
+      "be_etl_data_cleaner_split_summary_and_detail",
+      "be_main_inject_inline_event_links",
+      "bs4",
+      "cloudinary",
+      "cloudinary_uploader",
+      "re",
+      "requests",
+      "time",
+      "unicodedata"
+    ],
+    "1": [
+      "be_database_config_giaidoanlichsu",
+      "be_database_config_sukien",
+      "be_main",
+      "be_main_get_db",
+      "be_main_get_event_detail",
+      "be_main_get_offline_sync_pack",
+      "be_main_get_reading_progress",
+      "be_main_get_thumbnail_subquery",
+      "be_main_get_timeline_overview",
+      "be_main_get_user_reading_summary",
+      "be_main_get_year_month_breakdown",
+      "be_main_progressupdaterequest",
+      "be_main_root_health_check",
+      "be_main_save_reading_progress",
+      "be_main_search_events",
+      "be_main_stream_timeline_events",
+      "be_main_stream_timeline_events_to_sort_tuple",
+      "be_main_verify_saved_session",
+      "collections",
+      "fastapi",
+      "fastapi_middleware_cors",
+      "fastapi_middleware_gzip",
+      "get",
+      "pydantic",
+      "session",
+      "sqlalchemy_exc",
+      "typing",
+      "uuid"
+    ],
+    "2": [
+      "docker_compose",
+      "docker_compose_db_lichsu_container_name",
+      "docker_compose_db_lichsu_environment",
+      "docker_compose_db_lichsu_image",
+      "docker_compose_db_lichsu_ports",
+      "docker_compose_db_lichsu_restart",
+      "docker_compose_db_lichsu_volumes",
+      "docker_compose_environment_pgadmin_default_email",
+      "docker_compose_environment_pgadmin_default_password",
+      "docker_compose_environment_postgres_db",
+      "docker_compose_environment_postgres_password",
+      "docker_compose_environment_postgres_user",
+      "docker_compose_pgadmin_lichsu_container_name",
+      "docker_compose_pgadmin_lichsu_depends_on",
+      "docker_compose_pgadmin_lichsu_environment",
+      "docker_compose_pgadmin_lichsu_image",
+      "docker_compose_pgadmin_lichsu_ports",
+      "docker_compose_pgadmin_lichsu_restart",
+      "docker_compose_services",
+      "docker_compose_services_db_lichsu",
+      "docker_compose_services_pgadmin_lichsu",
+      "docker_compose_version",
+      "docker_compose_volumes",
+      "docker_compose_volumes_lichsuvn_pgdata"
+    ],
+    "3": [
+      "be_database_config",
+      "be_database_config_media",
+      "be_etl_crawl_youtube",
+      "be_etl_crawl_youtube_clean_event_keyword",
+      "be_etl_crawl_youtube_evaluate_video",
+      "be_etl_crawl_youtube_run_youtube_crawler",
+      "be_etl_crawl_youtube_search_youtube_videos",
+      "be_etl_seed_eras",
+      "be_etl_seed_eras_seed_giai_doan",
+      "dotenv",
+      "html",
+      "logging",
+      "os",
+      "sqlalchemy",
+      "sqlalchemy_dialects_postgresql",
+      "sqlalchemy_orm",
+      "sys"
+    ],
+    "4": [
+      "base",
+      "bcrypt",
+      "be_auth_utils",
+      "be_auth_utils_hash_password",
+      "be_auth_utils_rationale_12",
+      "be_auth_utils_rationale_4",
+      "be_auth_utils_verify_password",
+      "be_database_config_tientrinhdoc",
+      "be_database_config_user",
+      "be_etl_seed_users",
+      "be_etl_seed_users_seed_users_and_progress",
+      "be_main_login",
+      "be_main_register",
+      "faker",
+      "post",
+      "random"
+    ],
+    "5": [
+      "basemodel",
+      "be_main_giaidoanresponse",
+      "be_main_giaidoanresponse_config",
+      "be_main_loginrequest",
+      "be_main_loginrequest_strip_username",
+      "be_main_registerrequest",
+      "be_main_registerrequest_clean_ho_ten",
+      "be_main_registerrequest_normalize_email",
+      "be_main_registerrequest_validate_username",
+      "be_main_sukienresponse",
+      "be_main_sukienresponse_config",
+      "emailstr",
+      "field_validator"
+    ],
+    "6": [
+      "docker_compose_backend_lichsu_build",
+      "docker_compose_backend_lichsu_container_name",
+      "docker_compose_backend_lichsu_depends_on",
+      "docker_compose_backend_lichsu_env_file",
+      "docker_compose_backend_lichsu_environment",
+      "docker_compose_backend_lichsu_ports",
+      "docker_compose_backend_lichsu_restart",
+      "docker_compose_backend_lichsu_volumes",
+      "docker_compose_build_context",
+      "docker_compose_build_dockerfile",
+      "docker_compose_environment_database_url",
+      "docker_compose_services_backend_lichsu"
+    ],
+    "7": [
+      "be_etl_init"
+    ]
+  },
+  "cohesion": {
+    "0": 0.14516129032258066,
+    "1": 0.17724867724867724,
+    "2": 0.08333333333333333,
+    "3": 0.21323529411764705,
+    "4": 0.21666666666666667,
+    "5": 0.19230769230769232,
+    "6": 0.16666666666666666,
+    "7": 1.0
+  },
+  "gods": [
+    {
+      "id": "be_database_config_sukien",
+      "label": "SuKien",
+      "degree": 16
+    },
+    {
+      "id": "be_database_config_giaidoanlichsu",
+      "label": "GiaiDoanLichSu",
+      "degree": 14
+    },
+    {
+      "id": "be_database_config_media",
+      "label": "Media",
+      "degree": 11
+    },
+    {
+      "id": "be_etl_crawl_wiki_upsert_event_and_media",
+      "label": "upsert_event_and_media()",
+      "degree": 11
+    },
+    {
+      "id": "docker_compose_services_backend_lichsu",
+      "label": "backend_lichsu",
+      "degree": 9
+    },
+    {
+      "id": "be_database_config_tientrinhdoc",
+      "label": "TienTrinhDoc",
+      "degree": 8
+    },
+    {
+      "id": "be_database_config_user",
+      "label": "User",
+      "degree": 8
+    },
+    {
+      "id": "be_etl_crawl_wiki_run_full_crawler",
+      "label": "run_full_crawler()",
+      "degree": 8
+    },
+    {
+      "id": "be_main_get_event_detail",
+      "label": "get_event_detail()",
+      "degree": 8
+    },
+    {
+      "id": "be_main_get_offline_sync_pack",
+      "label": "get_offline_sync_pack()",
+      "degree": 8
+    }
+  ],
+  "surprises": [
+    {
+      "source": "get_event_detail()",
+      "target": "LienKetSuKien",
+      "source_files": [
+        "be/main.py",
+        "be/database_config.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    },
+    {
+      "source": "get_offline_sync_pack()",
+      "target": "LienKetSuKien",
+      "source_files": [
+        "be/main.py",
+        "be/database_config.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    },
+    {
+      "source": "run_full_crawler()",
+      "target": "GiaiDoanLichSu",
+      "source_files": [
+        "be/etl/crawl_wiki.py",
+        "be/database_config.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    },
+    {
+      "source": "seed_giai_doan()",
+      "target": "GiaiDoanLichSu",
+      "source_files": [
+        "be/etl/seed_eras.py",
+        "be/database_config.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "bridges separate communities; peripheral node `seed_giai_doan()` unexpectedly reaches hub `GiaiDoanLichSu`"
+    },
+    {
+      "source": "run_youtube_crawler()",
+      "target": "SuKien",
+      "source_files": [
+        "be/etl/crawl_youtube.py",
+        "be/database_config.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `RegisterRequest` connect `RegisterRequest` to `main.py`, `seed_users.py`?",
+      "why": "High betweenness centrality (0.049) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 9 inferred relationships involving `SuKien` (e.g. with `run_youtube_crawler()` and `seed_users_and_progress()`) actually correct?",
+      "why": "`SuKien` has 9 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `crawl_wiki.py` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.14516129032258066 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `SuKien` connect `main.py` to `crawl_wiki.py`, `database_config.py`, `seed_users.py`?",
+      "why": "High betweenness centrality (0.045) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 8 inferred relationships involving `GiaiDoanLichSu` (e.g. with `run_full_crawler()` and `get_event_detail()`) actually correct?",
+      "why": "`GiaiDoanLichSu` has 8 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `db_lichsu` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.08333333333333333 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `services` connect `db_lichsu` to `backend_lichsu`?",
+      "why": "High betweenness centrality (0.044) - this node is a cross-community bridge."
+    }
+  ]
+}

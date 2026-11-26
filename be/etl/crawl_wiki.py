@@ -337,7 +337,7 @@ def inject_inline_images_into_detail(detail_text: str, uploaded_inline_list: lis
             if sec and sec in result_text:
                 pattern = re.compile(rf"(==+\s*{re.escape(sec)}\s*==+)")
                 if pattern.search(result_text):
-                    result_text = pattern.sub(rf"\1{tag_str}", result_text, count=1)
+                    result_text = pattern.sub(lambda m: f"{m.group(1)}{tag_str}", result_text, count=1)
                     placed = True
 
         # Ưu tiên 3: Nếu không tìm thấy mốc nào, gom lại để chèn xen kẽ
@@ -400,13 +400,13 @@ def upsert_event_and_media(db, eras, wiki_data, year, month, day, title_to_event
 
         cloud_url = upload_image_to_cloudinary_strict(img_bytes, public_id)
         if cloud_url:
-            # Lưu đồng bộ vào bảng media kèm Chú thích vào cột tieu_de
+            # Lưu đồng bộ vào bảng media kèm Chú thích vào cột tieu_de (ảnh hợp lệ đầu tiên làm thumbnail)
             db.add(Media(
                 id_sukien=event_obj.id,
                 loai_media="IMAGE",
                 url_link=cloud_url,
                 tieu_de=in_img["caption"],
-                is_thumbnail=False
+                is_thumbnail=(len(uploaded_inline) == 0)
             ))
             uploaded_inline.append({
                 "cloud_url": cloud_url,

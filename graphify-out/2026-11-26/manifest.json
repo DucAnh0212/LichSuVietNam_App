@@ -1,0 +1,87 @@
+{
+  ".vscode/settings.json": {
+    "mtime": 1790689502.6922255,
+    "seen": 1795697014.4482286,
+    "ast_hash": "4aa85c6acde752675b31b354987521ce",
+    "semantic_hash": "4aa85c6acde752675b31b354987521ce",
+    "ast_empty": true
+  },
+  "be/auth_utils.py": {
+    "mtime": 1793201839.1878276,
+    "seen": 1795697014.4482286,
+    "ast_hash": "7ecf0ac92890a4da711b9b3cb9323d73",
+    "semantic_hash": "7ecf0ac92890a4da711b9b3cb9323d73"
+  },
+  "be/database_config.py": {
+    "mtime": 1793282723.4872038,
+    "seen": 1795697014.4482286,
+    "ast_hash": "a41424667c414c6970d89508d6c2620f",
+    "semantic_hash": "a41424667c414c6970d89508d6c2620f"
+  },
+  "be/etl/__init__.py": {
+    "mtime": 1792905031.57136,
+    "seen": 1795697014.4482286,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "be/etl/cloud_helper.py": {
+    "mtime": 1792941185.0729501,
+    "seen": 1795697014.4495063,
+    "ast_hash": "0a0219e9a6a38cf7ca2b6c997af04a3d",
+    "semantic_hash": "0a0219e9a6a38cf7ca2b6c997af04a3d"
+  },
+  "be/etl/crawl_wiki.py": {
+    "mtime": 1795697015.7799141,
+    "seen": 1795697017.1110418,
+    "ast_hash": "a364ad0e5a2e13d0a20569b7d9daf4eb",
+    "semantic_hash": ""
+  },
+  "be/etl/crawl_youtube.py": {
+    "mtime": 1793724740.4089484,
+    "seen": 1795697014.4495063,
+    "ast_hash": "2b9fdaa4bc7c49b7e7677f6ceb808d56",
+    "semantic_hash": "2b9fdaa4bc7c49b7e7677f6ceb808d56"
+  },
+  "be/etl/data_cleaner.py": {
+    "mtime": 1792906200.0405889,
+    "seen": 1795697014.4495063,
+    "ast_hash": "59c3bade86884ee791f3352ca30f8ceb",
+    "semantic_hash": "59c3bade86884ee791f3352ca30f8ceb"
+  },
+  "be/etl/seed_eras.py": {
+    "mtime": 1795697016.8137255,
+    "seen": 1795697017.1110418,
+    "ast_hash": "932bc394303a08be4318dffa7bc9d7a6",
+    "semantic_hash": ""
+  },
+  "be/etl/seed_users.py": {
+    "mtime": 1793201073.9433079,
+    "seen": 1795697014.4495063,
+    "ast_hash": "e6b40fd9e81a82ca29c4f72f79a4bfa4",
+    "semantic_hash": "e6b40fd9e81a82ca29c4f72f79a4bfa4"
+  },
+  "be/main.py": {
+    "mtime": 1795697013.5135524,
+    "seen": 1795697014.4495063,
+    "ast_hash": "260f9acbf49fc931844eb6ed859ef164",
+    "semantic_hash": "260f9acbf49fc931844eb6ed859ef164"
+  },
+  "docker-compose.yml": {
+    "mtime": 1793110715.503027,
+    "seen": 1795697014.4495063,
+    "ast_hash": "afb98c044b4028f4929d8399ad2ce9a7",
+    "semantic_hash": "afb98c044b4028f4929d8399ad2ce9a7"
+  },
+  "README.md": {
+    "mtime": 1793280853.7299054,
+    "seen": 1795697017.1110418,
+    "ast_hash": "8d79af5d818d9f0aa38dfb2daf6065c9",
+    "semantic_hash": ""
+  },
+  "be/requirements.txt": {
+    "mtime": 1793433736.1754415,
+    "seen": 1795697017.1110418,
+    "ast_hash": "4d9baa23a4571fa8b2cf549e757c2903",
+    "semantic_hash": ""
+  }
+}

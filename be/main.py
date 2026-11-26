@@ -7,8 +7,9 @@ from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, EmailStr
-from sqlalchemy import or_, and_, func
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from sqlalchemy import or_, func, tuple_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.dialects.postgresql import insert
 
@@ -37,7 +38,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -118,7 +119,7 @@ class GiaiDoanResponse(BaseModel):
     ten_giai_doan: str
     nam_bat_dau: int
     nam_ket_thuc: int
-    mo_ta: Optional[str] = None
+    mo_ta: Optional[str] = Field(None, validation_alias="mo_ta_ngan")
 
     class Config:
         from_attributes = True
@@ -136,20 +137,46 @@ class SuKienResponse(BaseModel):
         from_attributes = True
 
 class RegisterRequest(BaseModel):
-    username: str
+    username: str = Field(..., min_length=3, max_length=50)
     email: EmailStr
-    password: str
-    ho_ten: Optional[str] = None
+    password: str = Field(..., min_length=6, max_length=128)
+    ho_ten: Optional[str] = Field(None, max_length=100)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        cleaned = v.strip()
+        if len(cleaned) < 3:
+            raise ValueError("Tên đăng nhập phải có ít nhất 3 ký tự")
+        return cleaned
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: EmailStr) -> str:
+        return str(v).strip().lower()
+
+    @field_validator("ho_ten")
+    @classmethod
+    def clean_ho_ten(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        return cleaned or None
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., min_length=1, max_length=50)
+    password: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def strip_username(cls, v: str) -> str:
+        return v.strip()
 
 class ProgressUpdateRequest(BaseModel):
     id_user: uuid.UUID
     id_sukien: int
-    toa_do_scroll: int
-    phan_tram_hoan_thanh: float
+    toa_do_scroll: int = Field(..., ge=0)
+    phan_tram_hoan_thanh: float = Field(..., ge=0.0, le=100.0)
     da_hoan_thanh: bool
     
     
@@ -189,7 +216,7 @@ def get_timeline_overview(db: Session = Depends(get_db)):
             "ten_giai_doan": era.ten_giai_doan,
             "nam_bat_dau": era.nam_bat_dau,
             "nam_ket_thuc": era.nam_ket_thuc,
-            "mo_ta": era.mo_ta,
+            "mo_ta": era.mo_ta_ngan,
             "so_su_kien": stats_map[era.id].so_su_kien if era.id in stats_map else 0,
             "first_event_year": stats_map[era.id].nam_dau_tien if era.id in stats_map else era.nam_bat_dau,
             "last_event_year": stats_map[era.id].nam_cuoi_cung if era.id in stats_map else era.nam_ket_thuc
@@ -213,6 +240,13 @@ def stream_timeline_events(
     direction: str = Query("down", pattern="^(down|up)$", description="'down': cuộn xuống tương lai | 'up': vuốt ngược về quá khứ"),
     db: Session = Depends(get_db)
 ):
+    if (cursor_year is None) != (cursor_id is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Cần truyền đồng thời cả cursor_year và cursor_id"
+        )
+
+    thumb_sub = get_thumbnail_subquery(db)
     base_query = (
         db.query(
             SuKien.id,
@@ -225,14 +259,22 @@ def stream_timeline_events(
             SuKien.thang_dien_ra,
             SuKien.ngay_dien_ra,
             SuKien.noi_dung_tom_tat,
-            Media.url_link.label("thumbnail_url")
+            thumb_sub.c.thumbnail_url
         )
         .outerjoin(GiaiDoanLichSu, SuKien.id_giai_doan == GiaiDoanLichSu.id)
-        .outerjoin(Media, (Media.id_sukien == SuKien.id) & (Media.is_thumbnail == True))
+        .outerjoin(thumb_sub, thumb_sub.c.id_sukien == SuKien.id)
     )
 
+    # Khóa sắp xếp 4 cột đồng bộ tuyệt đối giữa ORDER BY và cursor WHERE (NULL xếp cuối khi ASC)
+    month_sort = func.coalesce(SuKien.thang_dien_ra, 99)
+    day_sort = func.coalesce(SuKien.ngay_dien_ra, 99)
+    event_sort_key = tuple_(SuKien.nam_dien_ra, month_sort, day_sort, SuKien.id)
+
+    def _to_sort_tuple(nam: int, thang: Optional[int], ngay: Optional[int], ev_id: int):
+        return (nam, thang if thang is not None else 99, ngay if ngay is not None else 99, ev_id)
+
     # KỊCH BẢN 1: Bắt đầu Zoom từ 1 Giai đoạn 
-    if cursor_year is None or cursor_id is None:
+    if cursor_year is None and cursor_id is None:
         start_year = anchor_year
         anchor_era_info = None
 
@@ -252,12 +294,7 @@ def stream_timeline_events(
                 first_ev_in_era = (
                     db.query(SuKien.nam_dien_ra, SuKien.id)
                     .filter(SuKien.id_giai_doan == anchor_era_id)
-                    .order_by(
-                        SuKien.nam_dien_ra.asc(),
-                        SuKien.thang_dien_ra.asc().nulls_last(),
-                        SuKien.ngay_dien_ra.asc().nulls_last(),
-                        SuKien.id.asc()
-                    )
+                    .order_by(SuKien.nam_dien_ra.asc(), month_sort.asc(), day_sort.asc(), SuKien.id.asc())
                     .first()
                 )
                 start_year = first_ev_in_era.nam_dien_ra if first_ev_in_era else era_obj.nam_bat_dau
@@ -268,57 +305,47 @@ def stream_timeline_events(
             query = base_query
 
         events = (
-            query.order_by(
-                SuKien.nam_dien_ra.asc(),
-                SuKien.thang_dien_ra.asc().nulls_last(),
-                SuKien.ngay_dien_ra.asc().nulls_last(),
-                SuKien.id.asc()
-            )
+            query.order_by(SuKien.nam_dien_ra.asc(), month_sort.asc(), day_sort.asc(), SuKien.id.asc())
             .limit(limit)
             .all()
         )
 
-    # KỊCH BẢN 2: Người dùng vuốt XUỐNG DƯỚI (tải tiếp tương lai)
-    elif direction == "down":
-        anchor_era_info = None
-        events = (
-            base_query.filter(
-                or_(
-                    SuKien.nam_dien_ra > cursor_year,
-                    and_(SuKien.nam_dien_ra == cursor_year, SuKien.id > cursor_id)
-                )
-            )
-            .order_by(
-                SuKien.nam_dien_ra.asc(),
-                SuKien.thang_dien_ra.asc().nulls_last(),
-                SuKien.ngay_dien_ra.asc().nulls_last(),
-                SuKien.id.asc()
-            )
-            .limit(limit)
-            .all()
-        )
-
-    # KỊCH BẢN 3: Người dùng vuốt NGƯỢC LÊN TRÊN (xem các năm của giai đoạn trước đó)
     else:
         anchor_era_info = None
-        events = (
-            base_query.filter(
-                or_(
-                    SuKien.nam_dien_ra < cursor_year,
-                    and_(SuKien.nam_dien_ra == cursor_year, SuKien.id < cursor_id)
-                )
-            )
-            .order_by(
-                SuKien.nam_dien_ra.desc(),
-                SuKien.thang_dien_ra.desc().nulls_first(),
-                SuKien.ngay_dien_ra.desc().nulls_first(),
-                SuKien.id.desc()
-            )
-            .limit(limit)
-            .all()
+        cursor_row = (
+            db.query(SuKien.nam_dien_ra, SuKien.thang_dien_ra, SuKien.ngay_dien_ra)
+            .filter(SuKien.id == cursor_id)
+            .first()
         )
-        # Đảo ngược lại để giữ đúng chiều thời gian từ trên xuống dưới
-        events = list(reversed(events))
+        if cursor_row:
+            cursor_tuple = _to_sort_tuple(
+                cursor_row.nam_dien_ra,
+                cursor_row.thang_dien_ra,
+                cursor_row.ngay_dien_ra,
+                cursor_id,
+            )
+        else:
+            fallback = 99 if direction == "down" else 0
+            cursor_tuple = (cursor_year, fallback, fallback, cursor_id)
+
+        # KỊCH BẢN 2: Người dùng vuốt XUỐNG DƯỚI (tải tiếp tương lai)
+        if direction == "down":
+            events = (
+                base_query.filter(event_sort_key > cursor_tuple)
+                .order_by(SuKien.nam_dien_ra.asc(), month_sort.asc(), day_sort.asc(), SuKien.id.asc())
+                .limit(limit)
+                .all()
+            )
+        # KỊCH BẢN 3: Người dùng vuốt NGƯỢC LÊN TRÊN (xem các năm của giai đoạn trước đó)
+        else:
+            events = (
+                base_query.filter(event_sort_key < cursor_tuple)
+                .order_by(SuKien.nam_dien_ra.desc(), month_sort.desc(), day_sort.desc(), SuKien.id.desc())
+                .limit(limit)
+                .all()
+            )
+            # Đảo ngược lại để giữ đúng chiều thời gian từ trên xuống dưới
+            events = list(reversed(events))
 
     # Kiểm tra xem còn dữ liệu ở phía trên (quá khứ) và phía dưới (tương lai) không
     has_more_up = False
@@ -332,26 +359,11 @@ def stream_timeline_events(
         prev_cursor = {"cursor_year": first_ev.nam_dien_ra, "cursor_id": first_ev.id}
         next_cursor = {"cursor_year": last_ev.nam_dien_ra, "cursor_id": last_ev.id}
 
-        has_more_up = (
-            db.query(SuKien.id)
-            .filter(
-                or_(
-                    SuKien.nam_dien_ra < first_ev.nam_dien_ra,
-                    and_(SuKien.nam_dien_ra == first_ev.nam_dien_ra, SuKien.id < first_ev.id)
-                )
-            )
-            .first() is not None
-        )
-        has_more_down = (
-            db.query(SuKien.id)
-            .filter(
-                or_(
-                    SuKien.nam_dien_ra > last_ev.nam_dien_ra,
-                    and_(SuKien.nam_dien_ra == last_ev.nam_dien_ra, SuKien.id > last_ev.id)
-                )
-            )
-            .first() is not None
-        )
+        first_tuple = _to_sort_tuple(first_ev.nam_dien_ra, first_ev.thang_dien_ra, first_ev.ngay_dien_ra, first_ev.id)
+        last_tuple = _to_sort_tuple(last_ev.nam_dien_ra, last_ev.thang_dien_ra, last_ev.ngay_dien_ra, last_ev.id)
+
+        has_more_up = db.query(SuKien.id).filter(event_sort_key < first_tuple).first() is not None
+        has_more_down = db.query(SuKien.id).filter(event_sort_key > last_tuple).first() is not None
 
     # Gom nhóm danh sách phẳng thành cả dạng Flat Items lẫn Year Groups để UI dễ dàng vẽ trục Năm
     year_groups_dict = defaultdict(list)
@@ -399,6 +411,7 @@ def stream_timeline_events(
 
 @app.get("/api/v1/timeline/year-detail/{year}", tags=["Timeline (Pinch-to-Zoom)"])
 def get_year_month_breakdown(year: int, db: Session = Depends(get_db)):
+    thumb_sub = get_thumbnail_subquery(db)
     events = (
         db.query(
             SuKien.id,
@@ -409,10 +422,10 @@ def get_year_month_breakdown(year: int, db: Session = Depends(get_db)):
             SuKien.thang_dien_ra,
             SuKien.ngay_dien_ra,
             SuKien.noi_dung_tom_tat,
-            Media.url_link.label("thumbnail_url")
+            thumb_sub.c.thumbnail_url
         )
         .outerjoin(GiaiDoanLichSu, SuKien.id_giai_doan == GiaiDoanLichSu.id)
-        .outerjoin(Media, (Media.id_sukien == SuKien.id) & (Media.is_thumbnail == True))
+        .outerjoin(thumb_sub, thumb_sub.c.id_sukien == SuKien.id)
         .filter(SuKien.nam_dien_ra == year)
         .order_by(
             SuKien.thang_dien_ra.asc().nulls_last(),
@@ -633,6 +646,7 @@ def get_offline_sync_pack(
 
     eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
 
+    thumb_sub = get_thumbnail_subquery(db)
     ev_query = (
         db.query(
             SuKien.id,
@@ -643,9 +657,9 @@ def get_offline_sync_pack(
             SuKien.ngay_dien_ra,
             SuKien.noi_dung_tom_tat,
             SuKien.noi_dung_chi_tiet,
-            Media.url_link.label("thumbnail_url")
+            thumb_sub.c.thumbnail_url
         )
-        .outerjoin(Media, (Media.id_sukien == SuKien.id) & (Media.is_thumbnail == True))
+        .outerjoin(thumb_sub, thumb_sub.c.id_sukien == SuKien.id)
     )
 
     if since_year is not None:
@@ -661,11 +675,22 @@ def get_offline_sync_pack(
         .all()
     )
 
-    links = db.query(
+    links_query = db.query(
         LienKetSuKien.id_sukien_goc,
         LienKetSuKien.id_sukien_lien_quan,
         LienKetSuKien.loai_lien_ket
-    ).all()
+    )
+    if since_year is not None:
+        event_ids = [ev.id for ev in events]
+        links = (
+            links_query.filter(
+                LienKetSuKien.id_sukien_goc.in_(event_ids),
+                LienKetSuKien.id_sukien_lien_quan.in_(event_ids)
+            ).all()
+            if event_ids else []
+        )
+    else:
+        links = links_query.all()
 
     payload = {
         "synced_at": int(now),
@@ -677,7 +702,7 @@ def get_offline_sync_pack(
                 "ten_giai_doan": era.ten_giai_doan,
                 "nam_bat_dau": era.nam_bat_dau,
                 "nam_ket_thuc": era.nam_ket_thuc,
-                "mo_ta": era.mo_ta
+                "mo_ta": era.mo_ta_ngan
             }
             for era in eras
         ],
@@ -715,7 +740,9 @@ def get_offline_sync_pack(
 # 5. XÁC THỰC NGƯỜI DÙNG & TIẾN TRÌNH ĐỌC
 @app.post("/api/v1/auth/register", tags=["Auth"])
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
-    if db.query(User).filter((User.username == req.username) | (User.email == req.email)).first():
+    if db.query(User).filter(
+        (User.username == req.username) | (func.lower(User.email) == req.email)
+    ).first():
         raise HTTPException(status_code=400, detail="Tên đăng nhập hoặc email đã tồn tại")
 
     new_user = User(
@@ -726,7 +753,11 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
         role="USER"
     )
     db.add(new_user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Tên đăng nhập hoặc email đã tồn tại")
     db.refresh(new_user)
     return {
         "message": "Đăng ký thành công",
@@ -776,6 +807,11 @@ def verify_saved_session(user_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @app.post("/api/v1/reading-progress", tags=["Reading Progress"])
 def save_reading_progress(req: ProgressUpdateRequest, db: Session = Depends(get_db)):
+    if not db.query(User.id).filter(User.id == req.id_user).first():
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+    if not db.query(SuKien.id).filter(SuKien.id == req.id_sukien).first():
+        raise HTTPException(status_code=404, detail="Không tìm thấy sự kiện")
+
     stmt = insert(TienTrinhDoc).values(
         id_user=req.id_user,
         id_sukien=req.id_sukien,
@@ -783,7 +819,7 @@ def save_reading_progress(req: ProgressUpdateRequest, db: Session = Depends(get_
         phan_tram_hoan_thanh=req.phan_tram_hoan_thanh,
         da_hoan_thanh=req.da_hoan_thanh
     ).on_conflict_do_update(
-        constraint="uq_user_sukien",
+        index_elements=["id_user", "id_sukien"],
         set_={
             "toa_do_scroll": req.toa_do_scroll,
             "phan_tram_hoan_thanh": req.phan_tram_hoan_thanh,
@@ -791,8 +827,15 @@ def save_reading_progress(req: ProgressUpdateRequest, db: Session = Depends(get_
             "last_read_at": func.now()
         }
     )
-    db.execute(stmt)
-    db.commit()
+    try:
+        db.execute(stmt)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="Dữ liệu tiến trình đọc không hợp lệ hoặc vi phạm ràng buộc dữ liệu"
+        )
     return {
         "message": "Cập nhật tiến trình đọc thành công",
         "id_user": str(req.id_user),
@@ -807,7 +850,10 @@ def get_user_reading_summary(
     limit: int = Query(10, ge=1, le=50, description="Số bài vừa đọc gần đây muốn hiển thị"),
     db: Session = Depends(get_db)
 ):
-    total_system_events = db.query(func.count(SuKien.id)).scalar() or 995
+    if not db.query(User.id).filter(User.id == user_id).first():
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+
+    total_system_events = db.query(func.count(SuKien.id)).scalar() or 0
 
     completed_count = (
         db.query(func.count(TienTrinhDoc.id))
@@ -821,6 +867,7 @@ def get_user_reading_summary(
         .scalar() or 0
     )
 
+    thumb_sub = get_thumbnail_subquery(db)
     recent_rows = (
         db.query(
             TienTrinhDoc.id_sukien,
@@ -831,11 +878,11 @@ def get_user_reading_summary(
             TienTrinhDoc.phan_tram_hoan_thanh,
             TienTrinhDoc.da_hoan_thanh,
             TienTrinhDoc.last_read_at,
-            Media.url_link.label("thumbnail_url")
+            thumb_sub.c.thumbnail_url
         )
         .join(SuKien, TienTrinhDoc.id_sukien == SuKien.id)
         .outerjoin(GiaiDoanLichSu, SuKien.id_giai_doan == GiaiDoanLichSu.id)
-        .outerjoin(Media, (Media.id_sukien == SuKien.id) & (Media.is_thumbnail == True))
+        .outerjoin(thumb_sub, thumb_sub.c.id_sukien == SuKien.id)
         .filter(TienTrinhDoc.id_user == user_id)
         .order_by(TienTrinhDoc.last_read_at.desc())
         .limit(limit)

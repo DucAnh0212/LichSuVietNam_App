@@ -1,0 +1,10 @@
+{
+  "0": "crawl_wiki.py",
+  "1": "main.py",
+  "2": "db_lichsu",
+  "3": "database_config.py",
+  "4": "seed_users.py",
+  "5": "RegisterRequest",
+  "6": "backend_lichsu",
+  "7": "__init__.py"
+}
