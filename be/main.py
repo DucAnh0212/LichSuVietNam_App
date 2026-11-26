@@ -14,17 +14,23 @@ from sqlalchemy.dialects.postgresql import insert
 
 from database_config import (
     engine,
+    quiz_engine,
     GiaiDoanLichSu,
     SuKien,
     Media,
     LienKetSuKien,
     User,
-    TienTrinhDoc
+    TienTrinhDoc,
+    CauHoiQuiz,
+    CauHoiOnTap,
+    KetQuaQuiz,
+    BinhLuan
 )
 from auth_utils import hash_password, verify_password
 
-# Khởi tạo phiên làm việc 
+# Khởi tạo phiên làm việc cho 2 DB riêng biệt
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+QuizSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=quiz_engine)
 
 # Khởi tạo ứng dụng FastAPI
 app = FastAPI(
@@ -49,8 +55,17 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 _OVERVIEW_CACHE = {"data": None, "expires_at": 0}
 _OFFLINE_PACK_CACHE = {"data": None, "expires_at": 0}
 
+# Session quản lý DB chính của Đức Anh
 def get_db():
     db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Session quản lý DB câu hỏi ôn tập của Tùng (không chạm vào DB Đức Anh)
+def get_quiz_db():
+    db = QuizSessionLocal()
     try:
         yield db
     finally:
@@ -151,6 +166,60 @@ class ProgressUpdateRequest(BaseModel):
     toa_do_scroll: int
     phan_tram_hoan_thanh: float
     da_hoan_thanh: bool
+
+class QuizResultCreateRequest(BaseModel):
+    id_user: uuid.UUID
+    id_sukien: Optional[int] = None
+    loai_quiz: str = "EVENT_QUIZ"
+    diem_so: int
+    tong_so_cau: int
+    danh_gia: Optional[str] = None
+
+class CommentCreateRequest(BaseModel):
+    id_sukien: int
+    id_user: uuid.UUID
+    noi_dung: str
+    ten_hien_thi: Optional[str] = None
+
+def serialize_question(q) -> dict:
+    """Chuẩn hóa dữ liệu câu hỏi trắc nghiệm từ bảng cau_hoi_quiz hoặc cau_hoi_on_tap."""
+    return {
+        "id": q.id,
+        "id_sukien": q.id_sukien,
+        "cau_hoi": q.cau_hoi,
+        "dap_an_a": q.dap_an_a,
+        "dap_an_b": q.dap_an_b,
+        "dap_an_c": q.dap_an_c,
+        "dap_an_d": q.dap_an_d,
+        "dap_an_dung": q.dap_an_dung,
+        "giai_thich": q.giai_thich
+    }
+
+def serialize_quiz_result(r: KetQuaQuiz) -> dict:
+    """Chuẩn hóa dữ liệu kết quả làm bài Quiz."""
+    return {
+        "id": r.id,
+        "id_user": str(r.id_user),
+        "id_sukien": r.id_sukien,
+        "loai_quiz": r.loai_quiz,
+        "diem_so": r.diem_so,
+        "tong_so_cau": r.tong_so_cau,
+        "phan_tram_dung": r.phan_tram_dung,
+        "danh_gia": r.danh_gia,
+        "completed_at": r.completed_at
+    }
+
+def serialize_comment(c: BinhLuan) -> dict:
+    """Chuẩn hóa dữ liệu bình luận cho màn hình diễn đàn."""
+    return {
+        "id": c.id,
+        "id_sukien": c.id_sukien,
+        "id_user": str(c.id_user),
+        "ten_hien_thi": c.ten_hien_thi,
+        "noi_dung": c.noi_dung,
+        "created_at": c.created_at,
+        "updated_at": c.updated_at
+    }
     
     
 @app.get("/", tags=["Health Check"])
@@ -189,7 +258,7 @@ def get_timeline_overview(db: Session = Depends(get_db)):
             "ten_giai_doan": era.ten_giai_doan,
             "nam_bat_dau": era.nam_bat_dau,
             "nam_ket_thuc": era.nam_ket_thuc,
-            "mo_ta": era.mo_ta,
+            "mo_ta": era.mo_ta_ngan,
             "so_su_kien": stats_map[era.id].so_su_kien if era.id in stats_map else 0,
             "first_event_year": stats_map[era.id].nam_dau_tien if era.id in stats_map else era.nam_bat_dau,
             "last_event_year": stats_map[era.id].nam_cuoi_cung if era.id in stats_map else era.nam_ket_thuc
@@ -624,7 +693,8 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
 @app.get("/api/v1/sync/offline-pack", tags=["Offline Sync (Room DB)"])
 def get_offline_sync_pack(
     since_year: Optional[int] = Query(None, description="Tùy chọn lọc từ một năm cụ thể nếu muốn tải từng phần"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    quiz_db: Session = Depends(get_quiz_db)
 ):
     now = time.time()
     # Nếu tải toàn bộ (không lọc năm) và đã có trong RAM Cache -> trả về ngay lập tức
@@ -667,17 +737,22 @@ def get_offline_sync_pack(
         LienKetSuKien.loai_lien_ket
     ).all()
 
+    cau_hoi_quiz_list = quiz_db.query(CauHoiQuiz).all()
+    cau_hoi_list = quiz_db.query(CauHoiOnTap).all()
+
     payload = {
         "synced_at": int(now),
         "total_eras": len(eras),
         "total_events": len(events),
+        "total_cau_hoi_quiz": len(cau_hoi_quiz_list),
+        "total_cau_hoi": len(cau_hoi_list),
         "eras": [
             {
                 "id": era.id,
                 "ten_giai_doan": era.ten_giai_doan,
                 "nam_bat_dau": era.nam_bat_dau,
                 "nam_ket_thuc": era.nam_ket_thuc,
-                "mo_ta": era.mo_ta
+                "mo_ta": era.mo_ta_ngan
             }
             for era in eras
         ],
@@ -702,7 +777,9 @@ def get_offline_sync_pack(
                 "loai_lien_ket": lk.loai_lien_ket
             }
             for lk in links
-        ]
+        ],
+        "cau_hoi_quiz": [serialize_question(q) for q in cau_hoi_quiz_list],
+        "cau_hoi_on_tap": [serialize_question(q) for q in cau_hoi_list]
     }
 
     if since_year is None:
@@ -892,3 +969,191 @@ def get_reading_progress(user_id: uuid.UUID, event_id: int, db: Session = Depend
         "quiz_unlocked": progress.da_hoan_thanh,
         "last_read_at": progress.last_read_at
     }
+
+
+# 6. API QUIZ LUYỆN TẬP SỰ KIỆN & CÂU HỎI ÔN TẬP TỔNG HỢP (ĐỌC TỪ DB TÙNG)
+
+# --- 1. QUIZ LUYỆN TẬP SỰ KIỆN (Đọc từ bảng cau_hoi_quiz) ---
+@app.get("/api/v1/quiz/event/{event_id}", tags=["Quiz (Luyện tập Sự kiện)"])
+def get_event_quiz(event_id: int, db: Session = Depends(get_quiz_db)):
+    """Lấy câu hỏi Quiz dành riêng cho 1 sự kiện từ bảng cau_hoi_quiz."""
+    questions = db.query(CauHoiQuiz).filter(CauHoiQuiz.id_sukien == event_id).order_by(CauHoiQuiz.id.asc()).all()
+    return {
+        "event_id": event_id,
+        "total_questions": len(questions),
+        "questions": [serialize_question(q) for q in questions]
+    }
+
+
+# --- 2. CÂU HỎI ÔN TẬP TỔNG HỢP (Đọc từ bảng cau_hoi_on_tap) ---
+@app.get("/api/v1/cau-hoi-on-tap/all", tags=["Câu Hỏi Ôn Tập (Tổng hợp)"])
+def get_all_questions(db: Session = Depends(get_quiz_db)):
+    """Lấy toàn bộ danh sách câu hỏi ôn tập từ bảng cau_hoi_on_tap."""
+    questions = db.query(CauHoiOnTap).order_by(CauHoiOnTap.id.asc()).all()
+    return {
+        "total_questions": len(questions),
+        "questions": [serialize_question(q) for q in questions]
+    }
+
+
+@app.get("/api/v1/cau-hoi-on-tap/random", tags=["Câu Hỏi Ôn Tập (Tổng hợp)"])
+def get_random_questions(
+    limit: int = Query(10, ge=1, le=100, description="Số lượng câu hỏi ngẫu nhiên cần lấy"),
+    db: Session = Depends(get_quiz_db)
+):
+    """Lấy ngẫu nhiên N câu hỏi ôn tập từ bảng cau_hoi_on_tap."""
+    questions = db.query(CauHoiOnTap).order_by(func.random()).limit(limit).all()
+    return {
+        "total_questions": len(questions),
+        "questions": [serialize_question(q) for q in questions]
+    }
+
+
+# 7. API KẾT QUẢ QUIZ & THEO DÕI TIẾN ĐỘ LÀM BÀI
+@app.post("/api/v1/quiz/results", status_code=status.HTTP_201_CREATED, tags=["Quiz Results (Tiến độ Quiz)"])
+def save_quiz_result(req: QuizResultCreateRequest, quiz_db: Session = Depends(get_quiz_db)):
+    """Lưu kết quả làm bài Quiz/Ôn tập để theo dõi tiến độ học tập của người dùng."""
+    if req.tong_so_cau <= 0:
+        raise HTTPException(status_code=400, detail="Tổng số câu phải lớn hơn 0")
+    if req.diem_so < 0 or req.diem_so > req.tong_so_cau:
+        raise HTTPException(status_code=400, detail="Điểm số không hợp lệ (phải nằm trong khoảng 0..tong_so_cau)")
+
+    loai_quiz = req.loai_quiz.strip().upper()
+    if loai_quiz not in ("EVENT_QUIZ", "ON_TAP"):
+        raise HTTPException(status_code=400, detail="loai_quiz chỉ hỗ trợ 'EVENT_QUIZ' hoặc 'ON_TAP'")
+
+    phan_tram = round((req.diem_so / req.tong_so_cau) * 100, 2)
+    danh_gia = req.danh_gia
+    if not danh_gia:
+        if phan_tram >= 80:
+            danh_gia = "Xuất sắc! Bạn đã nắm vững kiến thức lịch sử."
+        elif phan_tram >= 50:
+            danh_gia = "Khá tốt! Hãy ôn tập thêm để đạt điểm tối đa."
+        else:
+            danh_gia = "Cần ôn tập lại nội dung sự kiện này."
+
+    new_result = KetQuaQuiz(
+        id_user=req.id_user,
+        id_sukien=req.id_sukien,
+        loai_quiz=loai_quiz,
+        diem_so=req.diem_so,
+        tong_so_cau=req.tong_so_cau,
+        phan_tram_dung=phan_tram,
+        danh_gia=danh_gia
+    )
+    quiz_db.add(new_result)
+    quiz_db.commit()
+    quiz_db.refresh(new_result)
+
+    return {
+        "message": "Lưu kết quả Quiz thành công",
+        "result": serialize_quiz_result(new_result)
+    }
+
+
+@app.get("/api/v1/quiz/results/{user_id}", tags=["Quiz Results (Tiến độ Quiz)"])
+def get_user_quiz_results(
+    user_id: uuid.UUID,
+    event_id: Optional[int] = Query(None, description="Lọc lịch sử theo 1 sự kiện cụ thể"),
+    limit: int = Query(20, ge=1, le=100, description="Số lần làm bài gần nhất"),
+    quiz_db: Session = Depends(get_quiz_db)
+):
+    """Lấy thống kê tiến độ làm Quiz và lịch sử các lần làm bài của người dùng."""
+    base_query = quiz_db.query(KetQuaQuiz).filter(KetQuaQuiz.id_user == user_id)
+    if event_id is not None:
+        base_query = base_query.filter(KetQuaQuiz.id_sukien == event_id)
+
+    all_attempts = base_query.order_by(KetQuaQuiz.completed_at.desc(), KetQuaQuiz.id.desc()).all()
+    total_attempts = len(all_attempts)
+    passed_attempts = sum(1 for a in all_attempts if a.phan_tram_dung >= 50.0)
+    avg_percentage = round(sum(a.phan_tram_dung for a in all_attempts) / total_attempts, 2) if total_attempts else 0.0
+    best_percentage = max((a.phan_tram_dung for a in all_attempts), default=0.0)
+    completed_event_ids = sorted({a.id_sukien for a in all_attempts if a.id_sukien is not None and a.phan_tram_dung >= 50.0})
+
+    return {
+        "user_id": str(user_id),
+        "total_attempts": total_attempts,
+        "passed_attempts": passed_attempts,
+        "average_percentage": avg_percentage,
+        "best_percentage": best_percentage,
+        "completed_event_ids": completed_event_ids,
+        "history": [serialize_quiz_result(a) for a in all_attempts[:limit]]
+    }
+
+
+# 8. API DIỄN ĐÀN BÌNH LUẬN THEO SỰ KIỆN
+@app.get("/api/v1/comments/event/{event_id}", tags=["Comments (Diễn đàn Bình luận)"])
+def get_event_comments(
+    event_id: int,
+    page: int = Query(1, ge=1, description="Trang hiện tại (bắt đầu từ 1)"),
+    limit: int = Query(20, ge=1, le=100, description="Số bình luận mỗi trang"),
+    quiz_db: Session = Depends(get_quiz_db)
+):
+    """Lấy danh sách bình luận theo sự kiện có phân trang."""
+    base_query = quiz_db.query(BinhLuan).filter(BinhLuan.id_sukien == event_id)
+    total_comments = base_query.count()
+    offset = (page - 1) * limit
+    rows = (
+        base_query.order_by(BinhLuan.created_at.desc(), BinhLuan.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "event_id": event_id,
+        "page": page,
+        "limit": limit,
+        "total_comments": total_comments,
+        "has_more": (offset + len(rows)) < total_comments,
+        "comments": [serialize_comment(c) for c in rows]
+    }
+
+
+@app.post("/api/v1/comments", status_code=status.HTTP_201_CREATED, tags=["Comments (Diễn đàn Bình luận)"])
+def create_comment(
+    req: CommentCreateRequest,
+    db: Session = Depends(get_db),
+    quiz_db: Session = Depends(get_quiz_db)
+):
+    """Đăng bình luận mới cho một sự kiện lịch sử."""
+    clean_content = req.noi_dung.strip()
+    if not clean_content:
+        raise HTTPException(status_code=400, detail="Nội dung bình luận không được để trống")
+
+    display_name = req.ten_hien_thi.strip() if req.ten_hien_thi else None
+    if not display_name:
+        user = db.query(User).filter(User.id == req.id_user).first()
+        display_name = (user.ho_ten or user.username) if user else "Người dùng ẩn danh"
+
+    comment = BinhLuan(
+        id_sukien=req.id_sukien,
+        id_user=req.id_user,
+        ten_hien_thi=display_name,
+        noi_dung=clean_content
+    )
+    quiz_db.add(comment)
+    quiz_db.commit()
+    quiz_db.refresh(comment)
+
+    return {
+        "message": "Đăng bình luận thành công",
+        "comment": serialize_comment(comment)
+    }
+
+
+@app.delete("/api/v1/comments/{comment_id}", tags=["Comments (Diễn đàn Bình luận)"])
+def delete_comment(
+    comment_id: int,
+    user_id: uuid.UUID = Query(..., description="ID người dùng để xác thực quyền xóa"),
+    quiz_db: Session = Depends(get_quiz_db)
+):
+    """Xóa bình luận của chính người dùng."""
+    comment = quiz_db.query(BinhLuan).filter(BinhLuan.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bình luận")
+    if comment.id_user != user_id:
+        raise HTTPException(status_code=403, detail="Bạn không có quyền xóa bình luận này")
+
+    quiz_db.delete(comment)
+    quiz_db.commit()
+    return {"message": "Đã xóa bình luận thành công", "deleted_id": comment_id}
