@@ -9,30 +9,42 @@ from sqlalchemy.orm import relationship
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql+psycopg2://postgres.upkwhgkygewtzqphadtk:Ducanh02122005@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
-)
+def _normalize_pg_url(url: str) -> str:
+    """Đảm bảo chuỗi kết nối luôn dùng driver psycopg2 đã cài trong requirements.txt."""
+    cleaned = url.strip()
+    if cleaned.startswith("postgres://"):
+        return "postgresql+psycopg2://" + cleaned[len("postgres://"):]
+    if cleaned.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + cleaned[len("postgresql://"):]
+    return cleaned
 
-QUIZ_DATABASE_URL = os.getenv(
+DATABASE_URL = _normalize_pg_url(os.getenv(
+    "DATABASE_URL", 
+    "postgresql+psycopg2://admin:secretpassword@localhost:5433/lichsuvn_db"
+))
+
+QUIZ_DATABASE_URL = _normalize_pg_url(os.getenv(
     "QUIZ_DATABASE_URL",
     DATABASE_URL
-)
+))
+
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "5"))
 
 engine = create_engine(
     DATABASE_URL,
-    pool_size=10,           
-    max_overflow=20,       
-    pool_timeout=30,       
-    pool_recycle=1800,      
-    pool_pre_ping=True      
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True
 )
 
 # Engine riêng biệt cho Database Câu hỏi của Tùng (không làm thay đổi DB Đức Anh)
 quiz_engine = create_engine(
     QUIZ_DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
     pool_timeout=30,
     pool_recycle=1800,
     pool_pre_ping=True

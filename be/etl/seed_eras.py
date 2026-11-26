@@ -36,7 +36,7 @@ DANH_SACH_GIAI_DOAN = [
     {"ten": "Nhà Nguyễn (Giai đoạn Độc lập)", "bat_dau": 1802, "ket_thuc": 1883, "loai": "PHONG_KIEN", "mo_ta": "Vua Gia Long thống nhất hoàn toàn lãnh thổ, đặt quốc hiệu Việt Nam, đóng đô tại Phú Xuân (Huế)."},
 
     # IV. CẬN ĐẠI & HIỆN ĐẠI
-    {"ten": "Thời kỳ Pháp thuộc", "bat_dau": 1884, "ket_thuc": 1945, "loai": "THUC_DIAN", "mo_ta": "Việt Nam dưới ách bảo hộ của thực dân Pháp và các phong trào yêu nước, cách mạng giải phóng dân tộc."},
+    {"ten": "Thời kỳ Pháp thuộc", "bat_dau": 1884, "ket_thuc": 1945, "loai": "THUC_DAN", "mo_ta": "Việt Nam dưới ách bảo hộ của thực dân Pháp và các phong trào yêu nước, cách mạng giải phóng dân tộc."},
     {"ten": "Kháng chiến chống Pháp (VNDCCH)", "bat_dau": 1945, "ket_thuc": 1954, "loai": "CHIEN_TRANH", "mo_ta": "Từ Cách mạng Tháng Tám 1945 đến chiến thắng lịch sử Điện Biên Phủ và Hiệp định Genève 1954."},
     {"ten": "Kháng chiến chống Mỹ cứu nước", "bat_dau": 1954, "ket_thuc": 1975, "loai": "CHIEN_TRANH", "mo_ta": "Đất nước tạm thời chia cắt hai miền, đấu tranh thống nhất đất nước kết thúc bằng Đại thắng mùa Xuân 1975."},
     {"ten": "Thời kỳ Thống nhất & Bao cấp", "bat_dau": 1975, "ket_thuc": 1986, "loai": "HIEN_DAI", "mo_ta": "Tái thiết đất nước sau chiến tranh, thống nhất về mặt nhà nước và bảo vệ biên giới."},

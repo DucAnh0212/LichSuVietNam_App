@@ -23,6 +23,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy toàn bộ mã nguồn backend vào container
 COPY . .
 
+# Chạy container bằng user không có quyền root
+RUN useradd --create-home --shell /usr/sbin/nologin appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
 # Expose cổng 8000 của FastAPI/Uvicorn
 EXPOSE 8000
 
