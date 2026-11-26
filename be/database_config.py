@@ -9,10 +9,24 @@ from sqlalchemy.orm import relationship
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-DATABASE_URL = os.getenv(
+def _normalize_pg_url(url: str) -> str:
+    """Đảm bảo chuỗi kết nối luôn dùng driver psycopg2 đã cài trong requirements.txt."""
+    cleaned = url.strip()
+    if cleaned.startswith("postgres://"):
+        return "postgresql+psycopg2://" + cleaned[len("postgres://"):]
+    if cleaned.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + cleaned[len("postgresql://"):]
+    return cleaned
+
+DATABASE_URL = _normalize_pg_url(os.getenv(
     "DATABASE_URL", 
     "postgresql+psycopg2://admin:secretpassword@localhost:5433/lichsuvn_db"
-)
+))
+
+QUIZ_DATABASE_URL = _normalize_pg_url(os.getenv(
+    "QUIZ_DATABASE_URL",
+    DATABASE_URL
+))
 
 DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
 DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "5"))
@@ -25,6 +39,16 @@ engine = create_engine(
     pool_recycle=1800,
     pool_pre_ping=True
 )
+
+# Engine riêng biệt cho Database Câu hỏi của Tùng (không làm thay đổi DB Đức Anh)
+quiz_engine = create_engine(
+    QUIZ_DATABASE_URL,
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True
+) if QUIZ_DATABASE_URL != DATABASE_URL else engine
 Base = declarative_base()
 
 class User(Base):
@@ -99,7 +123,70 @@ class Media(Base):
     nguon_goc = Column(String(255))
     tieu_de = Column(Text, nullable=True)
     is_thumbnail = Column(Boolean, default=False)
-    
+
+class CauHoiQuiz(Base):
+    __tablename__ = 'cau_hoi_quiz'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    id_sukien = Column(Integer, nullable=True, index=True) # Không gắn ForeignKey vì su_kien nằm ở DB Đức Anh
+    cau_hoi = Column(Text, nullable=False)
+    dap_an_a = Column(Text, nullable=False)
+    dap_an_b = Column(Text, nullable=False)
+    dap_an_c = Column(Text, nullable=False)
+    dap_an_d = Column(Text, nullable=False)
+    dap_an_dung = Column(String(1), nullable=False) # 'A', 'B', 'C', 'D'
+    giai_thich = Column(Text, nullable=True)
+
+class CauHoiOnTap(Base):
+    __tablename__ = 'cau_hoi_on_tap'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    id_sukien = Column(Integer, nullable=True, index=True) # Không gắn ForeignKey vì su_kien nằm ở DB Đức Anh
+    cau_hoi = Column(Text, nullable=False)
+    dap_an_a = Column(Text, nullable=False)
+    dap_an_b = Column(Text, nullable=False)
+    dap_an_c = Column(Text, nullable=False)
+    dap_an_d = Column(Text, nullable=False)
+    dap_an_dung = Column(String(1), nullable=False) # 'A', 'B', 'C', 'D'
+    giai_thich = Column(Text, nullable=True)
+
+class KetQuaQuiz(Base):
+    __tablename__ = 'ket_qua_quiz'
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id_user = Column(UUID(as_uuid=True), nullable=False, index=True) # Tham chiếu users.id ở DB Đức Anh
+    id_sukien = Column(Integer, nullable=True, index=True) # NULL nếu là bài ôn tập tổng hợp
+    loai_quiz = Column(String(30), nullable=False, default='EVENT_QUIZ') # 'EVENT_QUIZ' | 'ON_TAP'
+    diem_so = Column(Integer, nullable=False)
+    tong_so_cau = Column(Integer, nullable=False)
+    phan_tram_dung = Column(Float, nullable=False, default=0.0)
+    danh_gia = Column(Text, nullable=True)
+    completed_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+class BinhLuan(Base):
+    __tablename__ = 'binh_luan'
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id_sukien = Column(Integer, nullable=False, index=True) # Tham chiếu su_kien.id ở DB Đức Anh
+    id_user = Column(UUID(as_uuid=True), nullable=False, index=True) # Tham chiếu users.id ở DB Đức Anh
+    ten_hien_thi = Column(String(100), nullable=True)
+    noi_dung = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+CORE_TABLES = [
+    User.__table__,
+    TienTrinhDoc.__table__,
+    GiaiDoanLichSu.__table__,
+    SuKien.__table__,
+    LienKetSuKien.__table__,
+    Media.__table__,
+]
+
+TUNG_TABLES = [
+    CauHoiQuiz.__table__,
+    CauHoiOnTap.__table__,
+    KetQuaQuiz.__table__,
+    BinhLuan.__table__,
+]
+
 if __name__ == "__main__":
-    Base.metadata.create_all(engine)
-    print("Khởi tạo thành công! Hãy mở pgAdmin để kiểm tra.")
+    Base.metadata.create_all(bind=engine, tables=CORE_TABLES)
+    Base.metadata.create_all(bind=quiz_engine, tables=TUNG_TABLES)
+    print("Khởi tạo thành công các bảng Core và Quiz/Tiến độ/Bình luận!")

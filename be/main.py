@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import or_, func, tuple_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.dialects.postgresql import insert
 
@@ -21,15 +21,22 @@ from database_config import (
     Media,
     LienKetSuKien,
     User,
-    TienTrinhDoc
+    TienTrinhDoc,
+    CauHoiQuiz,
+    CauHoiOnTap,
 )
 from auth_utils import hash_password, verify_password
+from routers.quiz_comments import (
+    router as quiz_comments_router,
+    get_quiz_db,
+    serialize_question,
+)
 
 # Giới hạn số nguyên 32-bit (INT4) của PostgreSQL để tránh DataError 500
 PG_INT_MIN = -2_147_483_648
 PG_INT_MAX = 2_147_483_647
 
-# Khởi tạo phiên làm việc 
+# Khởi tạo phiên làm việc
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Khởi tạo ứng dụng FastAPI
@@ -92,6 +99,7 @@ def _check_rate_limit(request: Optional[Request], scope: str, max_calls: int, wi
             )
         dq.append(now)
 
+# Session quản lý DB chính của Đức Anh
 def get_db():
     db = SessionLocal()
     try:
@@ -233,8 +241,8 @@ class ProgressUpdateRequest(BaseModel):
     toa_do_scroll: int = Field(..., ge=0, le=PG_INT_MAX)
     phan_tram_hoan_thanh: float = Field(..., ge=0.0, le=100.0)
     da_hoan_thanh: bool
-    
-    
+
+
 @app.get("/", tags=["Health Check"])
 def root_health_check():
     return {
@@ -710,7 +718,8 @@ def get_event_detail(
 def get_offline_sync_pack(
     request: Request,
     since_year: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="Tùy chọn lọc từ một năm cụ thể nếu muốn tải từng phần"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    quiz_db: Session = Depends(get_quiz_db)
 ):
     now = time.time()
     # Nếu đã có sẵn trong RAM Cache (toàn phần hoặc từng phần) -> trả về ngay lập tức
@@ -776,13 +785,37 @@ def get_offline_sync_pack(
                 ).all()
                 if event_ids else []
             )
+            try:
+                cau_hoi_quiz_list = (
+                    quiz_db.query(CauHoiQuiz)
+                    .filter(CauHoiQuiz.id_sukien.in_(event_ids))
+                    .order_by(CauHoiQuiz.id.asc())
+                    .all()
+                    if event_ids else []
+                )
+            except SQLAlchemyError:
+                quiz_db.rollback()
+                cau_hoi_quiz_list = []
         else:
             links = links_query.all()
+            try:
+                cau_hoi_quiz_list = quiz_db.query(CauHoiQuiz).order_by(CauHoiQuiz.id.asc()).all()
+            except SQLAlchemyError:
+                quiz_db.rollback()
+                cau_hoi_quiz_list = []
+
+        try:
+            cau_hoi_list = quiz_db.query(CauHoiOnTap).order_by(CauHoiOnTap.id.asc()).all()
+        except SQLAlchemyError:
+            quiz_db.rollback()
+            cau_hoi_list = []
 
         payload = {
             "synced_at": int(now),
             "total_eras": len(eras),
             "total_events": len(events),
+            "total_cau_hoi_quiz": len(cau_hoi_quiz_list),
+            "total_cau_hoi": len(cau_hoi_list),
             "eras": [
                 {
                     "id": era.id,
@@ -814,7 +847,9 @@ def get_offline_sync_pack(
                     "loai_lien_ket": lk.loai_lien_ket
                 }
                 for lk in links
-            ]
+            ],
+            "cau_hoi_quiz": [serialize_question(q) for q in cau_hoi_quiz_list],
+            "cau_hoi_on_tap": [serialize_question(q) for q in cau_hoi_list]
         }
 
         if since_year is None:
@@ -1043,3 +1078,7 @@ def get_reading_progress(
         "quiz_unlocked": progress.da_hoan_thanh,
         "last_read_at": progress.last_read_at
     }
+
+
+# 6. ĐĂNG KÝ ROUTER QUIZ, ÔN TẬP, KẾT QUẢ & BÌNH LUẬN (TÁCH FILE TRÁNH CONFLICT VỚI MAIN)
+app.include_router(quiz_comments_router)
