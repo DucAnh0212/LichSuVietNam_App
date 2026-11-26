@@ -1,0 +1,11 @@
+# IDE & tooling artifacts
+.vscode/
+.idea/
+graphify-out/
+
+# Python & local environments
+__pycache__/
+*.py[cod]
+be/venv/
+be/.env
+*.log

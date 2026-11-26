@@ -16,6 +16,13 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
 
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True
+)
+
 from sqlalchemy.orm import sessionmaker
 from database_config import engine, GiaiDoanLichSu, SuKien, LienKetSuKien, Media
 from etl.data_cleaner import clean_wiki_text, split_summary_and_detail, parse_historical_date
@@ -189,7 +196,8 @@ def upload_image_to_cloudinary_strict(img_bytes, public_id: str) -> str:
             ]
         )
         return response.get("secure_url")
-    except Exception:
+    except Exception as e:
+        logging.warning("Cloudinary upload failed for %s: %s", public_id, e)
         return None
 
 def fetch_wiki_article_rich(title: str):
@@ -382,12 +390,10 @@ def upsert_event_and_media(db, eras, wiki_data, year, month, day, title_to_event
         db.add(event_obj)
         db.flush()
 
-    # Dọn dẹp ảnh cũ để ghi đè danh sách ảnh chuẩn hóa mới
-    db.query(Media).filter_by(id_sukien=event_obj.id, loai_media="IMAGE").delete()
-
+    raw_inline_images = wiki_data.get("inline_images", [])
     uploaded_inline = []
-    # Đẩy toàn bộ tối đa 10 ảnh lên Cloudinary
-    for idx_img, in_img in enumerate(wiki_data.get("inline_images", []), 1):
+    # Đẩy toàn bộ tối đa 10 ảnh lên Cloudinary trước, tránh xóa ảnh cũ nếu mạng/Cloudinary lỗi giữa chừng
+    for idx_img, in_img in enumerate(raw_inline_images, 1):
         img_bytes = safe_download_image_bytes(in_img["raw_src"])
         if not img_bytes:
             continue
@@ -400,14 +406,6 @@ def upsert_event_and_media(db, eras, wiki_data, year, month, day, title_to_event
 
         cloud_url = upload_image_to_cloudinary_strict(img_bytes, public_id)
         if cloud_url:
-            # Lưu đồng bộ vào bảng media kèm Chú thích vào cột tieu_de (ảnh hợp lệ đầu tiên làm thumbnail)
-            db.add(Media(
-                id_sukien=event_obj.id,
-                loai_media="IMAGE",
-                url_link=cloud_url,
-                tieu_de=in_img["caption"],
-                is_thumbnail=(len(uploaded_inline) == 0)
-            ))
             uploaded_inline.append({
                 "cloud_url": cloud_url,
                 "caption": in_img["caption"],
@@ -415,8 +413,20 @@ def upsert_event_and_media(db, eras, wiki_data, year, month, day, title_to_event
                 "section": in_img["section"]
             })
 
-    # Cập nhật chi tiết văn bản chứa các thẻ [[IMAGE:url|caption]] đúng vị trí
-    event_obj.noi_dung_chi_tiet = inject_inline_images_into_detail(detail, uploaded_inline)
+    # Chỉ thay thế danh sách ảnh cũ khi có ảnh mới hợp lệ (hoặc bài gốc thực sự không có ảnh)
+    if uploaded_inline or not raw_inline_images:
+        db.query(Media).filter_by(id_sukien=event_obj.id, loai_media="IMAGE").delete()
+        for idx_up, up_item in enumerate(uploaded_inline):
+            db.add(Media(
+                id_sukien=event_obj.id,
+                loai_media="IMAGE",
+                url_link=up_item["cloud_url"],
+                tieu_de=up_item["caption"],
+                is_thumbnail=(idx_up == 0)
+            ))
+        event_obj.noi_dung_chi_tiet = inject_inline_images_into_detail(detail, uploaded_inline)
+    elif not existing_event:
+        event_obj.noi_dung_chi_tiet = detail
 
     title_to_event_obj[actual_title] = event_obj
     event_links_map[event_obj.id] = wiki_data["links"]

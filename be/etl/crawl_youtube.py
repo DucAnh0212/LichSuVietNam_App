@@ -117,11 +117,14 @@ def search_youtube_videos(query: str, raw_event_title: str, max_results: int = 3
         res = requests.get(YT_SEARCH_URL, params=params, timeout=12)
         
         if res.status_code in (403, 429):
-            err_data = res.json().get("error", {})
-            reasons = [e.get("reason") for e in err_data.get("errors", [])]
+            try:
+                err_data = res.json().get("error", {})
+            except ValueError:
+                err_data = {}
+            reasons = [e.get("reason") for e in err_data.get("errors", []) if isinstance(e, dict)]
             if "quotaExceeded" in reasons or "rateLimitExceeded" in reasons:
                 return [], True
-            print(f"\n Lỗi quyền API ({res.status_code}): {err_data.get('message')}")
+            print(f"\n Lỗi quyền API ({res.status_code}): {err_data.get('message') or res.text[:200]}")
             return [], True
 
         if res.status_code == 200:

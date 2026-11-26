@@ -1,10 +1,11 @@
 import uuid
 import re
 import time
-from collections import defaultdict
+import threading
+from collections import defaultdict, deque
 from typing import List, Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Path, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -23,6 +24,10 @@ from database_config import (
     TienTrinhDoc
 )
 from auth_utils import hash_password, verify_password
+
+# Giới hạn số nguyên 32-bit (INT4) của PostgreSQL để tránh DataError 500
+PG_INT_MIN = -2_147_483_648
+PG_INT_MAX = 2_147_483_647
 
 # Khởi tạo phiên làm việc 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -46,9 +51,46 @@ app.add_middleware(
 # 1. Bật nén GZip cho toàn bộ API (Đặc biệt hiệu quả cho gói Offline-Pack)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# 2. Bộ nhớ đệm (In-Memory Cache) giảm tải tuyệt đối cho Supabase
-_OVERVIEW_CACHE = {"data": None, "expires_at": 0}
-_OFFLINE_PACK_CACHE = {"data": None, "expires_at": 0}
+# 2. Bộ nhớ đệm (In-Memory Cache) có Lock chống stampede và giảm tải cho Supabase
+_OVERVIEW_CACHE = {"data": None, "expires_at": 0.0}
+_OVERVIEW_LOCK = threading.Lock()
+
+_OFFLINE_PACK_CACHE = {"data": None, "expires_at": 0.0}
+_OFFLINE_PARTIAL_CACHE = {}  # since_year -> {"data": payload, "expires_at": float}, tối đa 16 mục
+_OFFLINE_PARTIAL_MAX_ENTRIES = 16
+_OFFLINE_PACK_LOCK = threading.Lock()
+
+# 3. Bộ giới hạn tần suất nhẹ theo IP (tránh brute-force Auth & spam bypass cache)
+_RATE_LIMIT_BUCKETS = defaultdict(deque)
+_RATE_LIMIT_LOCK = threading.Lock()
+
+def _get_client_ip(request: Optional[Request]) -> str:
+    if request is None:
+        return "local"
+    xff = request.headers.get("x-forwarded-for") if hasattr(request, "headers") else None
+    if xff:
+        return xff.split(",")[0].strip() or "unknown"
+    client = getattr(request, "client", None)
+    return client.host if client and getattr(client, "host", None) else "unknown"
+
+def _check_rate_limit(request: Optional[Request], scope: str, max_calls: int, window_sec: int):
+    now = time.monotonic()
+    key = f"{scope}:{_get_client_ip(request)}"
+    with _RATE_LIMIT_LOCK:
+        # Dọn khóa cũ nếu quá nhiều IP tích tụ trong RAM
+        if len(_RATE_LIMIT_BUCKETS) > 1000:
+            stale = [k for k, dq in _RATE_LIMIT_BUCKETS.items() if not dq or now - dq[-1] > window_sec]
+            for k in stale:
+                del _RATE_LIMIT_BUCKETS[k]
+        dq = _RATE_LIMIT_BUCKETS[key]
+        while dq and now - dq[0] > window_sec:
+            dq.popleft()
+        if len(dq) >= max_calls:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Quá nhiều yêu cầu, vui lòng thử lại sau ít phút"
+            )
+        dq.append(now)
 
 def get_db():
     db = SessionLocal()
@@ -87,15 +129,25 @@ def inject_inline_event_links(content: str, related_events_list: list) -> str:
             if clean_title != ev_title and len(clean_title) > 4:
                 patterns_to_link.append((re.escape(clean_title), ev_id))
 
-        # 2. Khớp cụm từ "năm XXXX" 
+        # 2. Khớp cụm từ "năm XXXX" (hỗ trợ cả năm âm TCN / TrCN)
         if ev_year:
-            patterns_to_link.append((rf"năm\s+{ev_year}\b", ev_id))
+            if ev_year < 0:
+                patterns_to_link.append((rf"năm\s+{abs(ev_year)}\s*(?:TCN|TrCN)\b", ev_id))
+            else:
+                patterns_to_link.append((rf"năm\s+{ev_year}\b", ev_id))
 
     # Sắp xếp ưu tiên chuỗi dài trước để tránh cắt nhầm chuỗi con
     patterns_to_link.sort(key=lambda x: len(x[0]), reverse=True)
 
+    # Tạm ẩn các thẻ ảnh [[IMAGE:...]] để regex không chèn thẻ <a> làm hỏng URL/caption ảnh
+    image_tokens = []
+    def _mask_image(match):
+        idx = len(image_tokens)
+        image_tokens.append(match.group(0))
+        return f"\x00IMG_{idx}\x00"
+
     linked_ids_done = set()
-    modified_content = content
+    modified_content = re.sub(r"\[\[IMAGE:[^\]]*\]\]", _mask_image, content)
 
     for pattern_str, target_id in patterns_to_link:
         # Mỗi sự kiện liên quan chỉ cần highlight lần xuất hiện đầu tiên để bài đọc không bị rối mắt
@@ -110,6 +162,9 @@ def inject_inline_event_links(content: str, related_events_list: list) -> str:
                 count=1
             )
             linked_ids_done.add(target_id)
+
+    for idx, img_tag in enumerate(image_tokens):
+        modified_content = modified_content.replace(f"\x00IMG_{idx}\x00", img_tag)
 
     return modified_content
 
@@ -174,8 +229,8 @@ class LoginRequest(BaseModel):
 
 class ProgressUpdateRequest(BaseModel):
     id_user: uuid.UUID
-    id_sukien: int
-    toa_do_scroll: int = Field(..., ge=0)
+    id_sukien: int = Field(..., ge=PG_INT_MIN, le=PG_INT_MAX)
+    toa_do_scroll: int = Field(..., ge=0, le=PG_INT_MAX)
     phan_tram_hoan_thanh: float = Field(..., ge=0.0, le=100.0)
     da_hoan_thanh: bool
     
@@ -197,46 +252,51 @@ def get_timeline_overview(db: Session = Depends(get_db)):
     if _OVERVIEW_CACHE["data"] is not None and now < _OVERVIEW_CACHE["expires_at"]:
         return _OVERVIEW_CACHE["data"]
 
-    eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
-    era_stats = (
-        db.query(
-            SuKien.id_giai_doan,
-            func.count(SuKien.id).label("so_su_kien"),
-            func.min(SuKien.nam_dien_ra).label("nam_dau_tien"),
-            func.max(SuKien.nam_dien_ra).label("nam_cuoi_cung")
+    with _OVERVIEW_LOCK:
+        now = time.time()
+        if _OVERVIEW_CACHE["data"] is not None and now < _OVERVIEW_CACHE["expires_at"]:
+            return _OVERVIEW_CACHE["data"]
+
+        eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
+        era_stats = (
+            db.query(
+                SuKien.id_giai_doan,
+                func.count(SuKien.id).label("so_su_kien"),
+                func.min(SuKien.nam_dien_ra).label("nam_dau_tien"),
+                func.max(SuKien.nam_dien_ra).label("nam_cuoi_cung")
+            )
+            .group_by(SuKien.id_giai_doan)
+            .all()
         )
-        .group_by(SuKien.id_giai_doan)
-        .all()
-    )
-    stats_map = {row.id_giai_doan: row for row in era_stats}
+        stats_map = {row.id_giai_doan: row for row in era_stats}
 
-    result = [
-        {
-            "id": era.id,
-            "ten_giai_doan": era.ten_giai_doan,
-            "nam_bat_dau": era.nam_bat_dau,
-            "nam_ket_thuc": era.nam_ket_thuc,
-            "mo_ta": era.mo_ta_ngan,
-            "so_su_kien": stats_map[era.id].so_su_kien if era.id in stats_map else 0,
-            "first_event_year": stats_map[era.id].nam_dau_tien if era.id in stats_map else era.nam_bat_dau,
-            "last_event_year": stats_map[era.id].nam_cuoi_cung if era.id in stats_map else era.nam_ket_thuc
-        }
-        for era in eras
-    ]
+        result = [
+            {
+                "id": era.id,
+                "ten_giai_doan": era.ten_giai_doan,
+                "nam_bat_dau": era.nam_bat_dau,
+                "nam_ket_thuc": era.nam_ket_thuc,
+                "mo_ta": era.mo_ta_ngan,
+                "so_su_kien": stats_map[era.id].so_su_kien if era.id in stats_map else 0,
+                "first_event_year": stats_map[era.id].nam_dau_tien if era.id in stats_map else era.nam_bat_dau,
+                "last_event_year": stats_map[era.id].nam_cuoi_cung if era.id in stats_map else era.nam_ket_thuc
+            }
+            for era in eras
+        ]
 
-    # Lưu vào RAM trong 10 phút
-    _OVERVIEW_CACHE["data"] = result
-    _OVERVIEW_CACHE["expires_at"] = now + 600
-    return result
+        # Lưu vào RAM trong 10 phút
+        _OVERVIEW_CACHE["data"] = result
+        _OVERVIEW_CACHE["expires_at"] = now + 600
+        return result
 
 
 @app.get("/api/v1/timeline/stream", tags=["Timeline (Pinch-to-Zoom)"])
 def stream_timeline_events(
     limit: int = Query(20, ge=5, le=100, description="Số sự kiện tải mỗi lượt (mặc định 20)"),
-    anchor_era_id: Optional[int] = Query(None, description="ID giai đoạn khi người dùng đặt 2 ngón tay zoom"),
-    anchor_year: Optional[int] = Query(None, description="Năm cụ thể khi nhảy điểm neo"),
-    cursor_year: Optional[int] = Query(None, description="Năm của sự kiện ở mép màn hình dùng làm con trỏ"),
-    cursor_id: Optional[int] = Query(None, description="ID của sự kiện ở mép màn hình dùng làm con trỏ"),
+    anchor_era_id: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="ID giai đoạn khi người dùng đặt 2 ngón tay zoom"),
+    anchor_year: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="Năm cụ thể khi nhảy điểm neo"),
+    cursor_year: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="Năm của sự kiện ở mép màn hình dùng làm con trỏ"),
+    cursor_id: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="ID của sự kiện ở mép màn hình dùng làm con trỏ"),
     direction: str = Query("down", pattern="^(down|up)$", description="'down': cuộn xuống tương lai | 'up': vuốt ngược về quá khứ"),
     db: Session = Depends(get_db)
 ):
@@ -410,7 +470,10 @@ def stream_timeline_events(
 
 
 @app.get("/api/v1/timeline/year-detail/{year}", tags=["Timeline (Pinch-to-Zoom)"])
-def get_year_month_breakdown(year: int, db: Session = Depends(get_db)):
+def get_year_month_breakdown(
+    year: int = Path(..., ge=PG_INT_MIN, le=PG_INT_MAX),
+    db: Session = Depends(get_db)
+):
     thumb_sub = get_thumbnail_subquery(db)
     events = (
         db.query(
@@ -476,10 +539,10 @@ def get_year_month_breakdown(year: int, db: Session = Depends(get_db)):
 # 3. CHI TIẾT SỰ KIỆN, MEDIA, NHÂN QUẢ & TÌM KIẾM
 @app.get("/api/v1/events/search", tags=["Events"])
 def search_events(
-    q: Optional[str] = Query(None, description="Từ khóa tên sự kiện, tóm tắt hoặc số năm"),
-    era_id: Optional[int] = Query(None, description="Lọc theo ID giai đoạn lịch sử"),
-    from_year: Optional[int] = Query(None, description="Lọc từ năm (VD: -257 hoặc 938)"),
-    to_year: Optional[int] = Query(None, description="Lọc đến năm (VD: 1975)"),
+    q: Optional[str] = Query(None, max_length=100, description="Từ khóa tên sự kiện, tóm tắt hoặc số năm"),
+    era_id: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="Lọc theo ID giai đoạn lịch sử"),
+    from_year: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="Lọc từ năm (VD: -257 hoặc 938)"),
+    to_year: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="Lọc đến năm (VD: 1975)"),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db)
 ):
@@ -508,18 +571,24 @@ def search_events(
     if to_year is not None:
         query = query.filter(SuKien.nam_dien_ra <= to_year)
 
-    # 2. Lọc theo từ khóa hoặc số năm chính xác
+    # 2. Lọc theo từ khóa hoặc số năm chính xác (kiểm tra chặt định dạng ASCII + biên INT4)
     if q and q.strip():
         clean_q = q.strip()
-        if clean_q.lstrip("-").isdigit():
-            year_val = int(clean_q)
+        year_val = None
+        if re.fullmatch(r"-?[0-9]+", clean_q):
+            candidate = int(clean_q)
+            if PG_INT_MIN <= candidate <= PG_INT_MAX:
+                year_val = candidate
+
+        if year_val is not None:
             query = query.filter(SuKien.nam_dien_ra == year_val)
         else:
-            keyword = f"%{clean_q}%"
+            escaped_q = clean_q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            keyword = f"%{escaped_q}%"
             query = query.filter(
                 or_(
-                    SuKien.ten_sukien.ilike(keyword),
-                    SuKien.noi_dung_tom_tat.ilike(keyword)
+                    SuKien.ten_sukien.ilike(keyword, escape="\\"),
+                    SuKien.noi_dung_tom_tat.ilike(keyword, escape="\\")
                 )
             )
 
@@ -542,7 +611,10 @@ def search_events(
 
 
 @app.get("/api/v1/events/{event_id}", tags=["Events"])
-def get_event_detail(event_id: int, db: Session = Depends(get_db)):
+def get_event_detail(
+    event_id: int = Path(..., ge=PG_INT_MIN, le=PG_INT_MAX),
+    db: Session = Depends(get_db)
+):
     event = db.query(SuKien).filter(SuKien.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Không tìm thấy sự kiện")
@@ -636,112 +708,137 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
 # 4. ĐỒNG BỘ OFFLINE-FIRST CHO ROOM DATABASE (PHỤC VỤ TÙNG)
 @app.get("/api/v1/sync/offline-pack", tags=["Offline Sync (Room DB)"])
 def get_offline_sync_pack(
-    since_year: Optional[int] = Query(None, description="Tùy chọn lọc từ một năm cụ thể nếu muốn tải từng phần"),
+    request: Request,
+    since_year: Optional[int] = Query(None, ge=PG_INT_MIN, le=PG_INT_MAX, description="Tùy chọn lọc từ một năm cụ thể nếu muốn tải từng phần"),
     db: Session = Depends(get_db)
 ):
     now = time.time()
-    # Nếu tải toàn bộ (không lọc năm) và đã có trong RAM Cache -> trả về ngay lập tức
+    # Nếu đã có sẵn trong RAM Cache (toàn phần hoặc từng phần) -> trả về ngay lập tức
     if since_year is None and _OFFLINE_PACK_CACHE["data"] is not None and now < _OFFLINE_PACK_CACHE["expires_at"]:
         return _OFFLINE_PACK_CACHE["data"]
-
-    eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
-
-    thumb_sub = get_thumbnail_subquery(db)
-    ev_query = (
-        db.query(
-            SuKien.id,
-            SuKien.id_giai_doan,
-            SuKien.ten_sukien,
-            SuKien.nam_dien_ra,
-            SuKien.thang_dien_ra,
-            SuKien.ngay_dien_ra,
-            SuKien.noi_dung_tom_tat,
-            SuKien.noi_dung_chi_tiet,
-            thumb_sub.c.thumbnail_url
-        )
-        .outerjoin(thumb_sub, thumb_sub.c.id_sukien == SuKien.id)
-    )
-
     if since_year is not None:
-        ev_query = ev_query.filter(SuKien.nam_dien_ra >= since_year)
+        cached_partial = _OFFLINE_PARTIAL_CACHE.get(since_year)
+        if cached_partial is not None and now < cached_partial["expires_at"]:
+            return cached_partial["data"]
+        _check_rate_limit(request, "offline_pack_partial", max_calls=15, window_sec=60)
 
-    events = (
-        ev_query.order_by(
-            SuKien.nam_dien_ra.asc(),
-            SuKien.thang_dien_ra.asc().nulls_last(),
-            SuKien.ngay_dien_ra.asc().nulls_last(),
-            SuKien.id.asc()
+    with _OFFLINE_PACK_LOCK:
+        now = time.time()
+        if since_year is None and _OFFLINE_PACK_CACHE["data"] is not None and now < _OFFLINE_PACK_CACHE["expires_at"]:
+            return _OFFLINE_PACK_CACHE["data"]
+        if since_year is not None:
+            cached_partial = _OFFLINE_PARTIAL_CACHE.get(since_year)
+            if cached_partial is not None and now < cached_partial["expires_at"]:
+                return cached_partial["data"]
+
+        eras = db.query(GiaiDoanLichSu).order_by(GiaiDoanLichSu.nam_bat_dau.asc()).all()
+
+        thumb_sub = get_thumbnail_subquery(db)
+        ev_query = (
+            db.query(
+                SuKien.id,
+                SuKien.id_giai_doan,
+                SuKien.ten_sukien,
+                SuKien.nam_dien_ra,
+                SuKien.thang_dien_ra,
+                SuKien.ngay_dien_ra,
+                SuKien.noi_dung_tom_tat,
+                SuKien.noi_dung_chi_tiet,
+                thumb_sub.c.thumbnail_url
+            )
+            .outerjoin(thumb_sub, thumb_sub.c.id_sukien == SuKien.id)
         )
-        .all()
-    )
 
-    links_query = db.query(
-        LienKetSuKien.id_sukien_goc,
-        LienKetSuKien.id_sukien_lien_quan,
-        LienKetSuKien.loai_lien_ket
-    )
-    if since_year is not None:
-        event_ids = [ev.id for ev in events]
-        links = (
-            links_query.filter(
-                LienKetSuKien.id_sukien_goc.in_(event_ids),
-                LienKetSuKien.id_sukien_lien_quan.in_(event_ids)
-            ).all()
-            if event_ids else []
+        if since_year is not None:
+            ev_query = ev_query.filter(SuKien.nam_dien_ra >= since_year)
+
+        events = (
+            ev_query.order_by(
+                SuKien.nam_dien_ra.asc(),
+                SuKien.thang_dien_ra.asc().nulls_last(),
+                SuKien.ngay_dien_ra.asc().nulls_last(),
+                SuKien.id.asc()
+            )
+            .all()
         )
-    else:
-        links = links_query.all()
 
-    payload = {
-        "synced_at": int(now),
-        "total_eras": len(eras),
-        "total_events": len(events),
-        "eras": [
-            {
-                "id": era.id,
-                "ten_giai_doan": era.ten_giai_doan,
-                "nam_bat_dau": era.nam_bat_dau,
-                "nam_ket_thuc": era.nam_ket_thuc,
-                "mo_ta": era.mo_ta_ngan
-            }
-            for era in eras
-        ],
-        "events": [
-            {
-                "id": ev.id,
-                "id_giai_doan": ev.id_giai_doan,
-                "ten_sukien": ev.ten_sukien,
-                "nam_dien_ra": ev.nam_dien_ra,
-                "thang_dien_ra": ev.thang_dien_ra,
-                "ngay_dien_ra": ev.ngay_dien_ra,
-                "noi_dung_tom_tat": ev.noi_dung_tom_tat,
-                "noi_dung_chi_tiet": ev.noi_dung_chi_tiet,
-                "thumbnail_url": ev.thumbnail_url
-            }
-            for ev in events
-        ],
-        "links": [
-            {
-                "id_sukien_goc": lk.id_sukien_goc,
-                "id_sukien_lien_quan": lk.id_sukien_lien_quan,
-                "loai_lien_ket": lk.loai_lien_ket
-            }
-            for lk in links
-        ]
-    }
+        links_query = db.query(
+            LienKetSuKien.id_sukien_goc,
+            LienKetSuKien.id_sukien_lien_quan,
+            LienKetSuKien.loai_lien_ket
+        )
+        if since_year is not None:
+            event_ids = [ev.id for ev in events]
+            links = (
+                links_query.filter(
+                    LienKetSuKien.id_sukien_goc.in_(event_ids),
+                    LienKetSuKien.id_sukien_lien_quan.in_(event_ids)
+                ).all()
+                if event_ids else []
+            )
+        else:
+            links = links_query.all()
 
-    if since_year is None:
-        # Lưu vào RAM Cache trong 30 phút (1800 giây)
-        _OFFLINE_PACK_CACHE["data"] = payload
-        _OFFLINE_PACK_CACHE["expires_at"] = now + 1800
+        payload = {
+            "synced_at": int(now),
+            "total_eras": len(eras),
+            "total_events": len(events),
+            "eras": [
+                {
+                    "id": era.id,
+                    "ten_giai_doan": era.ten_giai_doan,
+                    "nam_bat_dau": era.nam_bat_dau,
+                    "nam_ket_thuc": era.nam_ket_thuc,
+                    "mo_ta": era.mo_ta_ngan
+                }
+                for era in eras
+            ],
+            "events": [
+                {
+                    "id": ev.id,
+                    "id_giai_doan": ev.id_giai_doan,
+                    "ten_sukien": ev.ten_sukien,
+                    "nam_dien_ra": ev.nam_dien_ra,
+                    "thang_dien_ra": ev.thang_dien_ra,
+                    "ngay_dien_ra": ev.ngay_dien_ra,
+                    "noi_dung_tom_tat": ev.noi_dung_tom_tat,
+                    "noi_dung_chi_tiet": ev.noi_dung_chi_tiet,
+                    "thumbnail_url": ev.thumbnail_url
+                }
+                for ev in events
+            ],
+            "links": [
+                {
+                    "id_sukien_goc": lk.id_sukien_goc,
+                    "id_sukien_lien_quan": lk.id_sukien_lien_quan,
+                    "loai_lien_ket": lk.loai_lien_ket
+                }
+                for lk in links
+            ]
+        }
 
-    return payload
+        if since_year is None:
+            # Lưu vào RAM Cache trong 30 phút (1800 giây)
+            _OFFLINE_PACK_CACHE["data"] = payload
+            _OFFLINE_PACK_CACHE["expires_at"] = now + 1800
+        else:
+            # Lưu cache từng phần tối đa 16 mốc năm trong 5 phút (300 giây)
+            expired_keys = [k for k, v in _OFFLINE_PARTIAL_CACHE.items() if now >= v["expires_at"]]
+            for k in expired_keys:
+                del _OFFLINE_PARTIAL_CACHE[k]
+            if len(_OFFLINE_PARTIAL_CACHE) >= _OFFLINE_PARTIAL_MAX_ENTRIES:
+                oldest_key = min(_OFFLINE_PARTIAL_CACHE, key=lambda k: _OFFLINE_PARTIAL_CACHE[k]["expires_at"])
+                del _OFFLINE_PARTIAL_CACHE[oldest_key]
+            _OFFLINE_PARTIAL_CACHE[since_year] = {"data": payload, "expires_at": now + 300}
+
+        return payload
 
 # 5. XÁC THỰC NGƯỜI DÙNG & TIẾN TRÌNH ĐỌC
 @app.post("/api/v1/auth/register", tags=["Auth"])
-def register(req: RegisterRequest, db: Session = Depends(get_db)):
+def register(req: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    _check_rate_limit(request, "auth_register", max_calls=10, window_sec=60)
     if db.query(User).filter(
-        (User.username == req.username) | (func.lower(User.email) == req.email)
+        (func.lower(User.username) == req.username.lower()) | (func.lower(User.email) == req.email)
     ).first():
         raise HTTPException(status_code=400, detail="Tên đăng nhập hoặc email đã tồn tại")
 
@@ -763,14 +860,16 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
         "message": "Đăng ký thành công",
         "user_id": str(new_user.id),
         "username": new_user.username,
+        "email": new_user.email,
         "ho_ten": new_user.ho_ten,
         "role": new_user.role
     }
 
 
 @app.post("/api/v1/auth/login", tags=["Auth"])
-def login(req: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == req.username).first()
+def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    _check_rate_limit(request, "auth_login", max_calls=20, window_sec=60)
+    user = db.query(User).filter(func.lower(User.username) == req.username.lower()).first()
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sai tài khoản hoặc mật khẩu")
 
@@ -917,7 +1016,11 @@ def get_user_reading_summary(
 
 
 @app.get("/api/v1/reading-progress/{user_id}/{event_id}", tags=["Reading Progress"])
-def get_reading_progress(user_id: uuid.UUID, event_id: int, db: Session = Depends(get_db)):
+def get_reading_progress(
+    user_id: uuid.UUID,
+    event_id: int = Path(..., ge=PG_INT_MIN, le=PG_INT_MAX),
+    db: Session = Depends(get_db)
+):
     progress = (
         db.query(TienTrinhDoc)
         .filter(TienTrinhDoc.id_user == user_id, TienTrinhDoc.id_sukien == event_id)
@@ -929,7 +1032,8 @@ def get_reading_progress(user_id: uuid.UUID, event_id: int, db: Session = Depend
             "toa_do_scroll": 0,
             "phan_tram_hoan_thanh": 0.0,
             "da_hoan_thanh": False,
-            "quiz_unlocked": False
+            "quiz_unlocked": False,
+            "last_read_at": None
         }
     return {
         "id_sukien": progress.id_sukien,
